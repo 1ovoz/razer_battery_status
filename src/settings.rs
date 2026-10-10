@@ -17,7 +17,7 @@ use windows_sys::Win32::UI::HiDpi::{AdjustWindowRectExForDpi, GetDpiForSystem};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, SetFocus};
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
-use razer_battery_tray::config::{Config, Remind, DEVICES};
+use razer_battery_tray::config::{Config, Remind, DEVICES, POLL_CHOICES, POLL_DEFAULT};
 
 use crate::tray::{wide, with_app};
 
@@ -58,6 +58,7 @@ const ID_THRESHOLD: i32 = 300;
 const ID_REMIND: i32 = 301;
 const ID_OPACITY: i32 = 302;
 const ID_OPACITY_LABEL: i32 = 303;
+const ID_POLL: i32 = 304;
 const ID_NAME: i32 = 230; // +행: 장치 이름 글자
 const ID_UP: i32 = 240; // +행
 const ID_DOWN: i32 = 250; // +행
@@ -123,7 +124,7 @@ pub fn open(config: Config, names: [String; DEVICES]) {
         let dpi = GetDpiForSystem();
         let s = |v: i32| v * dpi as i32 / 96;
         let style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
-        let mut r = RECT { left: 0, top: 0, right: s(600), bottom: s(478) };
+        let mut r = RECT { left: 0, top: 0, right: s(600), bottom: s(516) };
         AdjustWindowRectExForDpi(&mut r, style, 0, 0, dpi);
         let (w, h) = (r.right - r.left, r.bottom - r.top);
         let x = (GetSystemMetrics(SM_CXSCREEN) - w) / 2;
@@ -249,7 +250,7 @@ unsafe fn build_controls(hwnd: HWND, dpi: u32) {
             *c.borrow_mut() = vec![
                 RECT { left: s(12), top: s(12), right: s(588), bottom: s(60) },
                 RECT { left: s(12), top: s(70), right: s(588), bottom: s(284) },
-                RECT { left: s(12), top: s(294), right: s(588), bottom: s(422) },
+                RECT { left: s(12), top: s(294), right: s(588), bottom: s(460) },
             ]
         });
         let h = control(hwnd, "BUTTON", "", cb, s(28), s(22), s(20), s(28), ID_AUTOSTART);
@@ -308,14 +309,27 @@ unsafe fn build_controls(hwnd: HWND, dpi: u32) {
             SendMessageW(h, CB_SETCURSEL, 5, 0); // 1번만
         }
 
-        label("위젯 배경 불투명도", 28, 382, 180, -1);
-        let h = control(hwnd, "msctls_trackbar32", "", WS_TABSTOP | TBS_NOTICKS as u32, s(214), s(382), s(300), s(28), ID_OPACITY);
+        label("갱신 주기", 28, 382, 180, -1);
+        let h = control(hwnd, "COMBOBOX", "", combo_style, s(220), s(382), s(150), s(300), ID_POLL);
+        for (i, p) in POLL_CHOICES.iter().enumerate() {
+            let text = if *p == POLL_DEFAULT { format!("{p}초 (추천)") } else { format!("{p}초") };
+            SendMessageW(h, CB_ADDSTRING, 0, wide(&text).as_ptr() as LPARAM);
+            if *p == cfg.poll_secs {
+                SendMessageW(h, CB_SETCURSEL, i, 0);
+            }
+        }
+        if SendMessageW(h, CB_GETCURSEL, 0, 0) < 0 {
+            SendMessageW(h, CB_SETCURSEL, 1, 0); // 5초
+        }
+
+        label("위젯 배경 불투명도", 28, 420, 180, -1);
+        let h = control(hwnd, "msctls_trackbar32", "", WS_TABSTOP | TBS_NOTICKS as u32, s(214), s(420), s(300), s(28), ID_OPACITY);
         SendMessageW(h, TBM_SETRANGE, 1, (100 << 16) as LPARAM);
         SendMessageW(h, TBM_SETPOS, 1, cfg.bg_opacity as LPARAM);
-        label(&format!("{}%", cfg.bg_opacity), 520, 382, 60, ID_OPACITY_LABEL);
+        label(&format!("{}%", cfg.bg_opacity), 520, 420, 60, ID_OPACITY_LABEL);
 
-        control(hwnd, "BUTTON", "저장", WS_TABSTOP | BS_DEFPUSHBUTTON as u32, s(372), s(436), s(100), s(32), IDOK);
-        control(hwnd, "BUTTON", "취소", WS_TABSTOP, s(482), s(436), s(100), s(32), IDCANCEL);
+        control(hwnd, "BUTTON", "저장", WS_TABSTOP | BS_DEFPUSHBUTTON as u32, s(372), s(474), s(100), s(32), IDOK);
+        control(hwnd, "BUTTON", "취소", WS_TABSTOP, s(482), s(474), s(100), s(32), IDCANCEL);
     }
 }
 
@@ -351,6 +365,8 @@ unsafe fn save(hwnd: HWND) {
         let r = SendMessageW(item(hwnd, ID_REMIND), CB_GETCURSEL, 0, 0);
         cfg.remind = Remind::CHOICES.get(r as usize).copied().unwrap_or(Remind::Once);
         cfg.bg_opacity = SendMessageW(item(hwnd, ID_OPACITY), TBM_GETPOS, 0, 0).clamp(0, 100) as u8;
+        let p = SendMessageW(item(hwnd, ID_POLL), CB_GETCURSEL, 0, 0);
+        cfg.poll_secs = POLL_CHOICES.get(p as usize).copied().unwrap_or(POLL_DEFAULT);
 
         let want = checked(hwnd, ID_AUTOSTART);
         if want != autostart_enabled() {

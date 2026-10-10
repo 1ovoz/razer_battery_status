@@ -81,9 +81,15 @@ pub struct Config {
     /// 위젯 전체 크기 % (60..=200)
     pub scale: u16,
     pub widget_visible: bool,
+    /// 로그·컨트롤러 확인 주기 (초)
+    pub poll_secs: u32,
     /// 위젯 화면 좌표 (없으면 기본 위치)
     pub pos: Option<(i32, i32)>,
 }
+
+/// 갱신 주기 선택지 (초). 5초가 기본·추천.
+pub const POLL_CHOICES: [u32; 5] = [1, 5, 15, 30, 60];
+pub const POLL_DEFAULT: u32 = 5;
 
 pub const SCALE_MIN: u16 = 60;
 pub const SCALE_MAX: u16 = 200;
@@ -101,6 +107,7 @@ impl Default for Config {
             layout: Layout::Grid,
             scale: 100,
             widget_visible: true,
+            poll_secs: POLL_DEFAULT,
             pos: None,
         }
     }
@@ -145,6 +152,7 @@ impl Config {
                 }
                 "scale" => c.scale = v.parse::<u32>().map_or(100, |s| s.clamp(SCALE_MIN as u32, SCALE_MAX as u32) as u16),
                 "widget_visible" => c.widget_visible = v != "0",
+                "poll_secs" => c.poll_secs = v.parse::<u32>().map_or(POLL_DEFAULT, |p| p.clamp(1, 3600)),
                 "pos" => {
                     c.pos = v.split_once(',').and_then(|(x, y)| Some((x.trim().parse().ok()?, y.trim().parse().ok()?)))
                 }
@@ -162,7 +170,7 @@ impl Config {
 
     pub fn serialize(&self) -> String {
         let mut s = format!(
-            "order={}\nshow_widget={}\nshow_tray={}\nlow_threshold={}\nremind={}\nbg_opacity={}\nlayout={}\nscale={}\nwidget_visible={}\n",
+            "order={}\nshow_widget={}\nshow_tray={}\nlow_threshold={}\nremind={}\nbg_opacity={}\nlayout={}\nscale={}\nwidget_visible={}\npoll_secs={}\n",
             self.order.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(","),
             bools(&self.show_widget),
             bools(&self.show_tray),
@@ -176,6 +184,7 @@ impl Config {
             },
             self.scale,
             self.widget_visible as u8,
+            self.poll_secs,
         );
         if let Some((x, y)) = self.pos {
             s += &format!("pos={x},{y}\n");
@@ -260,6 +269,7 @@ mod tests {
         c.layout = Layout::Vertical;
         c.scale = 150;
         c.widget_visible = false;
+        c.poll_secs = 15;
         c.pos = Some((-1200, 300));
         assert_eq!(Config::parse(&c.serialize()), c);
         assert_eq!(c.display_name(2, "Viper"), "내 마우스 = 메인");
@@ -268,7 +278,9 @@ mod tests {
 
     #[test]
     fn bad_values_fall_back() {
-        let c = Config::parse("scale=9999\nbg_opacity=300\nremind=0\nlayout=?\nshow_tray=0\ngarbage\n");
+        let c = Config::parse("scale=9999\nbg_opacity=300\nremind=0\nlayout=?\nshow_tray=0\npoll_secs=0\ngarbage\n");
+        assert_eq!(c.poll_secs, 1);
+        assert_eq!(Config::parse("poll_secs=abc").poll_secs, POLL_DEFAULT);
         assert_eq!(c.scale, SCALE_MAX);
         assert_eq!(c.bg_opacity, 100);
         assert_eq!(c.remind, Remind::Once);

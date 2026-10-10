@@ -26,7 +26,6 @@ use crate::widget::{device_tile, pad_tile, Style, Widget, SHORT_NAMES};
 
 const WM_TRAY: u32 = WM_APP + 1;
 const TIMER_ID: usize = 1;
-const POLL_MS: u32 = 30_000;
 const IDM_EXIT: usize = 1;
 const IDM_WIDGET: usize = 2;
 const IDM_SETTINGS: usize = 3;
@@ -155,7 +154,8 @@ pub fn run() {
         app.refresh_widget(false);
         APP.with(|a| *a.borrow_mut() = Some(app));
 
-        SetTimer(hwnd, TIMER_ID, POLL_MS, None);
+        let poll_secs = with_app(|a| a.config.poll_secs).unwrap_or(5);
+        SetTimer(hwnd, TIMER_ID, poll_secs * 1000, None);
 
         let mut msg: MSG = zeroed();
         while GetMessageW(&mut msg, null_mut(), 0, 0) > 0 {
@@ -341,6 +341,10 @@ impl App {
 
     /// 설정 창에서 저장한 설정 반영
     pub(crate) fn apply_config(&mut self, cfg: Config) {
+        if cfg.poll_secs != self.config.poll_secs {
+            // 같은 ID로 다시 부르면 주기만 바뀐다
+            unsafe { SetTimer(self.hwnd, TIMER_ID, cfg.poll_secs * 1000, None) };
+        }
         self.config = cfg;
         self.save_config();
         self.tips = Default::default(); // 이름이 바뀌었을 수 있으니 툴팁 다시 반영
