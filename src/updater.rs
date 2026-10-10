@@ -1,11 +1,9 @@
-//! 자동 업데이트: GitHub의 dist/latest.txt를 확인하고, 서명이 맞는 새 exe만 받아 둔다.
+//! 새 버전 알림: GitHub의 dist/version.txt에서 최신 버전 번호만 확인한다.
+//! 설치는 하지 않는다. 새 버전이 있으면 알림을 띄우고, 사용자가 직접 받아서 바꾼다.
 //!
-//! - 통신은 WinHTTP, 해시·서명 검증은 BCrypt(Windows 기본 암호화). WinHTTP는 한 번 불러오면
-//!   프로세스에서 내려가지 않으므로, 확인은 같은 exe를 `--update-check`로 띄운 짧은 프로세스에서
-//!   하고 결과만 파일로 넘긴다(메인 앱의 메모리는 그대로).
-//! - 서명 검증: tools/release.sh가 개발 PC의 비밀 키로 "버전\nSHA256\n"에 서명한다.
-//!   앱에는 공개 키만 들어 있어서, GitHub 저장소가 털려도 그 키 없이는 가짜 exe를 배포할 수 없다.
-//! - 실제 교체·재시작은 메인 앱(tray.rs)이 한다.
+//! - 통신은 WinHTTP(Windows 기본). WinHTTP는 한 번 불러오면 프로세스에서 내려가지 않으므로,
+//!   확인은 같은 exe를 `--update-check`로 띄운 짧은 프로세스에서 하고 결과만 파일로 넘긴다
+//!   (메인 앱의 메모리는 그대로).
 
 use std::ffi::c_void;
 use std::path::PathBuf;
@@ -14,23 +12,20 @@ use std::ptr::{null, null_mut};
 use windows_sys::Win32::Foundation::{FreeLibrary, HMODULE};
 use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryExW, LOAD_LIBRARY_SEARCH_SYSTEM32};
 
-use razer_battery_tray::update_info::{is_newer, parse_latest};
+use razer_battery_tray::update_info::{is_newer, parse_version_file};
 
 use crate::tray::wide;
 
-/// 업데이트 파일 위치. 로컬 테스트용으로 RBT_UPDATE_BASE 환경 변수로 바꿀 수 있지만 localhost만 허용한다.
+/// 최신 버전 번호 파일 위치. 로컬 테스트용으로 RBT_UPDATE_BASE 환경 변수로 바꿀 수 있지만 localhost만 허용한다.
 const UPDATE_BASE: &str = "https://raw.githubusercontent.com/1ovoz/razer_battery_status/main/dist/";
+/// 새 버전 알림을 누르면 여는 다운로드 페이지
+pub const DOWNLOAD_PAGE: &str = "https://github.com/1ovoz/razer_battery_status#설치";
 
-/// 서명 확인용 ECDSA P-256 공개 키 (X || Y). 비밀 키는 개발 PC에만 있다.
-const PUBLIC_KEY: &str = "5980f6911fee019c153f312082c63c4d108f34624f8bfe12b75ad81b51b1ab2b39ad3b8e9bd2916044fd5aa85c4dfe604834d9fa7c3c03c4d1a96cb4218a708c";
-
-const MAX_LATEST: usize = 4 * 1024;
-const MAX_EXE: usize = 16 * 1024 * 1024;
+const MAX_VERSION_FILE: usize = 256;
 
 pub enum Outcome {
     UpToDate,
-    /// 검증을 마친 새 exe가 path에 저장됨
-    Ready { version: String, path: PathBuf },
+    Newer(String),
     Failed(String),
 }
 
@@ -59,8 +54,6 @@ impl Drop for Dll {
 }
 
 type H = *mut c_void;
-
-// ───────────── WinHTTP ─────────────
 
 struct Http {
     _dll: Dll,
@@ -150,7 +143,7 @@ impl Http {
                 return Err(format!("서버 응답 {status}"));
             }
             let mut body = Vec::new();
-            let mut buf = vec![0u8; 16 * 1024];
+            let mut buf = [0u8; 1024];
             loop {
                 let mut n = 0u32;
                 if (self.read)(req.0, buf.as_mut_ptr() as *mut _, buf.len() as u32, &mut n) == 0 {
@@ -169,96 +162,30 @@ impl Http {
     }
 }
 
-// ───────────── BCrypt (SHA-256, ECDSA P-256) ─────────────
-
-struct Crypto {
-    _dll: Dll,
-    open_alg: unsafe extern "system" fn(*mut H, *const u16, *const u16, u32) -> i32,
-    close_alg: unsafe extern "system" fn(H, u32) -> i32,
-    hash: unsafe extern "system" fn(H, *const u8, u32, *const u8, u32, *mut u8, u32) -> i32,
-    import_key: unsafe extern "system" fn(H, H, *const u16, *mut H, *const u8, u32, u32) -> i32,
-    verify: unsafe extern "system" fn(H, *const c_void, *const u8, u32, *const u8, u32, u32) -> i32,
-    destroy_key: unsafe extern "system" fn(H) -> i32,
-}
-
-impl Crypto {
-    fn load() -> Result<Self, String> {
-        let dll = Dll::load("bcrypt.dll")?;
-        unsafe {
-            Ok(Crypto {
-                open_alg: dll.get(b"BCryptOpenAlgorithmProvider\0")?,
-                close_alg: dll.get(b"BCryptCloseAlgorithmProvider\0")?,
-                hash: dll.get(b"BCryptHash\0")?,
-                import_key: dll.get(b"BCryptImportKeyPair\0")?,
-                verify: dll.get(b"BCryptVerifySignature\0")?,
-                destroy_key: dll.get(b"BCryptDestroyKey\0")?,
-                _dll: dll,
-            })
-        }
-    }
-
-    fn sha256(&self, data: &[u8]) -> Result<[u8; 32], String> {
-        unsafe {
-            let mut alg: H = null_mut();
-            if (self.open_alg)(&mut alg, wide("SHA256").as_ptr(), null(), 0) != 0 {
-                return Err("SHA256 준비 실패".into());
-            }
-            let mut out = [0u8; 32];
-            let st = (self.hash)(alg, null(), 0, data.as_ptr(), data.len() as u32, out.as_mut_ptr(), 32);
-            (self.close_alg)(alg, 0);
-            if st != 0 { Err("SHA256 계산 실패".into()) } else { Ok(out) }
-        }
-    }
-
-    /// message의 SHA-256에 대한 ECDSA P-256 서명(r||s)이 공개 키와 맞는지
-    fn verify_p256(&self, public_xy: &[u8; 64], message: &[u8], signature: &[u8; 64]) -> Result<bool, String> {
-        let digest = self.sha256(message)?;
-        unsafe {
-            let mut alg: H = null_mut();
-            if (self.open_alg)(&mut alg, wide("ECDSA_P256").as_ptr(), null(), 0) != 0 {
-                return Err("ECDSA 준비 실패".into());
-            }
-            // BCRYPT_ECCKEY_BLOB { magic = BCRYPT_ECDSA_PUBLIC_P256_MAGIC("ECS1"), cbKey = 32 } + X + Y
-            let mut blob = Vec::with_capacity(8 + 64);
-            blob.extend_from_slice(&0x3153_4345u32.to_le_bytes());
-            blob.extend_from_slice(&32u32.to_le_bytes());
-            blob.extend_from_slice(public_xy);
-            let mut key: H = null_mut();
-            let st = (self.import_key)(alg, null_mut(), wide("ECCPUBLICBLOB").as_ptr(), &mut key, blob.as_ptr(), blob.len() as u32, 0);
-            if st != 0 {
-                (self.close_alg)(alg, 0);
-                return Err("공개 키 불러오기 실패".into());
-            }
-            let ok = (self.verify)(key, null(), digest.as_ptr(), 32, signature.as_ptr(), 64, 0) == 0;
-            (self.destroy_key)(key);
-            (self.close_alg)(alg, 0);
-            Ok(ok)
-        }
-    }
-}
-
-fn public_key() -> [u8; 64] {
-    let mut k = [0u8; 64];
-    for (i, b) in k.iter_mut().enumerate() {
-        *b = u8::from_str_radix(&PUBLIC_KEY[i * 2..i * 2 + 2], 16).unwrap_or(0);
-    }
-    k
-}
-
-/// %LOCALAPPDATA%\RazerBatteryTray\update
-pub fn update_dir() -> Option<PathBuf> {
-    Some(PathBuf::from(std::env::var_os("LOCALAPPDATA")?).join("RazerBatteryTray").join("update"))
+/// %LOCALAPPDATA%\RazerBatteryTray
+pub fn app_dir() -> Option<PathBuf> {
+    Some(PathBuf::from(std::env::var_os("LOCALAPPDATA")?).join("RazerBatteryTray"))
 }
 
 fn result_path() -> Option<PathBuf> {
-    Some(update_dir()?.join("check_result.txt"))
+    Some(app_dir()?.join("update_check.txt"))
+}
+
+fn check_inner(current: &str) -> Result<Outcome, String> {
+    let base = match std::env::var("RBT_UPDATE_BASE") {
+        Ok(b) if b.starts_with("http://localhost:") || b.starts_with("http://127.0.0.1:") => b,
+        _ => UPDATE_BASE.to_string(),
+    };
+    let text = Http::load()?.get(&format!("{base}version.txt"), MAX_VERSION_FILE)?;
+    let latest = parse_version_file(&String::from_utf8_lossy(&text)).ok_or("version.txt 형식 오류")?;
+    Ok(if is_newer(&latest, current) { Outcome::Newer(latest) } else { Outcome::UpToDate })
 }
 
 /// 확인 전용 프로세스(`--update-check`)의 본체: 확인하고 결과를 파일에 쓴 뒤 끝난다
 pub fn run_check_process(current: &str) {
     let text = match check_inner(current) {
         Ok(Outcome::UpToDate) => "UPTODATE".to_string(),
-        Ok(Outcome::Ready { version, .. }) => format!("READY\n{version}"),
+        Ok(Outcome::Newer(v)) => format!("NEWER\n{v}"),
         Ok(Outcome::Failed(e)) | Err(e) => format!("FAILED\n{e}"),
     };
     if let Some(p) = result_path() {
@@ -269,7 +196,7 @@ pub fn run_check_process(current: &str) {
     }
 }
 
-/// 메인 앱에서: 확인 프로세스를 띄워 끝날 때까지(최대 2분) 기다리고 결과를 읽는다 (블로킹 → 스레드에서 호출)
+/// 메인 앱에서: 확인 프로세스를 띄워 끝날 때까지(최대 1분) 기다리고 결과를 읽는다 (블로킹 → 스레드에서 호출)
 pub fn check_in_child() -> Outcome {
     let (Ok(exe), Some(result)) = (std::env::current_exe(), result_path()) else {
         return Outcome::Failed("실행 파일 위치를 알 수 없음".into());
@@ -283,7 +210,7 @@ pub fn check_in_child() -> Outcome {
     loop {
         match child.try_wait() {
             Ok(Some(_)) => break,
-            Ok(None) if waited < 240 => {
+            Ok(None) if waited < 120 => {
                 std::thread::sleep(std::time::Duration::from_millis(500));
                 waited += 1;
             }
@@ -299,60 +226,8 @@ pub fn check_in_child() -> Outcome {
     let mut lines = text.lines();
     match (lines.next(), lines.next()) {
         (Some("UPTODATE"), _) => Outcome::UpToDate,
-        (Some("READY"), Some(v)) => match update_dir() {
-            Some(dir) => Outcome::Ready { version: v.to_string(), path: dir.join("razer_battery_tray.new.exe") },
-            None => Outcome::Failed("LOCALAPPDATA 없음".into()),
-        },
+        (Some("NEWER"), Some(v)) => Outcome::Newer(v.to_string()),
         (Some("FAILED"), msg) => Outcome::Failed(msg.unwrap_or("알 수 없는 오류").to_string()),
         _ => Outcome::Failed("확인 결과를 읽지 못함".into()),
     }
-}
-
-/// 버전이 맞지 않는 업데이트를 반복해서 받지 않도록 건너뛸 버전을 적어 두는 파일
-fn skip_path() -> Option<PathBuf> {
-    Some(update_dir()?.join("skip_version.txt"))
-}
-
-/// 이 버전은 앞으로 자동 업데이트하지 않는다 (받은 exe의 실제 버전이 latest.txt와 달랐을 때)
-pub fn skip_version(version: &str) {
-    if let Some(p) = skip_path() {
-        if let Some(dir) = p.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
-        let _ = std::fs::write(p, version);
-    }
-}
-
-fn check_inner(current: &str) -> Result<Outcome, String> {
-    let base = match std::env::var("RBT_UPDATE_BASE") {
-        Ok(b) if b.starts_with("http://localhost:") || b.starts_with("http://127.0.0.1:") => b,
-        _ => UPDATE_BASE.to_string(),
-    };
-    let http = Http::load()?;
-    let text = http.get(&format!("{base}latest.txt"), MAX_LATEST)?;
-    let latest = parse_latest(&String::from_utf8_lossy(&text)).ok_or("latest.txt 형식 오류")?;
-    if !is_newer(&latest.version, current) {
-        return Ok(Outcome::UpToDate);
-    }
-    let skipped = skip_path().and_then(|p| std::fs::read_to_string(p).ok()).unwrap_or_default();
-    if skipped.trim() == latest.version {
-        return Err(format!("{}은 버전이 맞지 않아 건너뜁니다 (다음 버전을 기다림)", latest.version));
-    }
-
-    let crypto = Crypto::load()?;
-    // 1) 버전·해시 목록이 개발자 키로 서명됐는지
-    if !crypto.verify_p256(&public_key(), latest.signed_message.as_bytes(), &latest.signature)? {
-        return Err("서명이 맞지 않아 업데이트를 거부했습니다".into());
-    }
-    // 2) 받은 exe가 서명된 해시와 같은지
-    let exe = http.get(&format!("{base}razer_battery_tray.exe"), MAX_EXE)?;
-    if crypto.sha256(&exe)? != latest.sha256 {
-        return Err("받은 파일이 서명된 내용과 달라 업데이트를 거부했습니다".into());
-    }
-    // 3) 검증된 파일만 저장
-    let dir = update_dir().ok_or("LOCALAPPDATA 없음")?;
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let path = dir.join("razer_battery_tray.new.exe");
-    std::fs::write(&path, &exe).map_err(|e| format!("저장 실패: {e}"))?;
-    Ok(Outcome::Ready { version: latest.version, path })
 }
