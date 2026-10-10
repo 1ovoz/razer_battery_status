@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
-  <assemblyIdentity type="win32" name="RazerBatteryTray" version="0.1.0.0"/>
+  <assemblyIdentity type="win32" name="RazerBatteryTray" version="1.0.0.0"/> <!-- Cargo.toml 버전과 맞출 것 -->
   <!-- 설정 창 컨트롤을 최신 Windows 모양으로 (Common Controls 6) -->
   <dependency>
     <dependentAssembly>

@@ -62,6 +62,7 @@ const ID_NAME: i32 = 230; // +행: 장치 이름 글자
 const ID_UP: i32 = 240; // +행
 const ID_DOWN: i32 = 250; // +행
 const ID_HEADER: i32 = 500; // 이 번호 이상인 글자는 흐린 색
+const ID_VERSION: i32 = 600; // 창 배경 위의 버전 글자
 
 // windows-sys에서 다른 기능 묶음에 있는 상수들
 const SS_CENTER: u32 = 0x1;
@@ -330,6 +331,8 @@ unsafe fn build_controls(hwnd: HWND, dpi: u32) {
         SendMessageW(h, TBM_SETPOS, 1, cfg.bg_opacity as LPARAM);
         label(&format!("{}%", cfg.bg_opacity), 520, 420 + DY, 60, ID_OPACITY_LABEL);
 
+        label(&format!("버전 {}", env!("CARGO_PKG_VERSION")), 16, 476 + DY, 200, ID_VERSION);
+
         control(hwnd, "BUTTON", "저장", WS_TABSTOP | BS_DEFPUSHBUTTON as u32, s(372), s(474 + DY), s(100), s(32), IDOK);
         control(hwnd, "BUTTON", "취소", WS_TABSTOP, s(482), s(474 + DY), s(100), s(32), IDCANCEL);
     }
@@ -424,10 +427,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             // 컨트롤 글자·배경색: 카드 위 글자는 카드색, 입력칸은 조금 밝게
             WM_CTLCOLORSTATIC | WM_CTLCOLORBTN | WM_CTLCOLOREDIT | WM_CTLCOLORLISTBOX => {
                 let hdc = wp as HDC;
-                let Some((_, card, edit)) = BRUSHES.with(|b| *b.borrow()) else { return 0 };
+                let Some((window, card, edit)) = BRUSHES.with(|b| *b.borrow()) else { return 0 };
                 let id = GetDlgCtrlID(lp as HWND);
                 let (fg, bk, brush) = match msg {
                     WM_CTLCOLOREDIT | WM_CTLCOLORLISTBOX => (C_TEXT, C_EDIT, edit),
+                    _ if id == ID_VERSION => (C_SUBTEXT, C_WINDOW, window),
                     _ if id >= ID_HEADER => (C_SUBTEXT, C_CARD, card),
                     _ => (C_TEXT, C_CARD, card),
                 };

@@ -1,6 +1,6 @@
 # Razer Battery Tray
 
-Razer 무선 기기(마우스·헤드셋 등)와 GameSir G7 Pro 컨트롤러의 배터리 잔량을 **작업표시줄 트레이 아이콘**과 **바탕화면 위젯**으로 보여 주는 아주 가벼운 Windows 프로그램입니다.
+**버전 1.0.0** · Razer 무선 기기(마우스·헤드셋 등)와 GameSir G7 Pro 컨트롤러의 배터리 잔량을 **작업표시줄 트레이 아이콘**과 **바탕화면 위젯**으로 보여 주는 아주 가벼운 Windows 프로그램입니다.
 
 ![위젯 미리보기](docs/widget-preview.png)
 
@@ -90,10 +90,12 @@ GameSir G7 Pro ──▶ Windows XInput ──▶ 이 프로그램 ──▶ 트
 4. 트레이 아이콘을 오른쪽 클릭 → 설정 → "Windows 시작 시 자동 실행"을 체크합니다.
 5. Windows 11은 새 트레이 아이콘을 숨김 영역(^)에 넣습니다. 늘 보이게 하려면 **설정 → 개인 설정 → 작업 표시줄 → 기타 시스템 트레이 아이콘**에서 켜세요.
 
+버전은 설정 창 왼쪽 아래나 exe 파일 속성(우클릭 → 속성 → 자세히)에서 볼 수 있습니다.
+
 받은 파일이 맞는지 확인하려면 PowerShell에서 `Get-FileHash razer_battery_tray.exe`를 실행해 아래 값과 비교하세요.
 
 ```
-SHA256  1D8713F675039253DA8C628515A88D082BA74E2F812DA30832971A559FBE7ED6
+SHA256  E57323A7C3865273CD679DFFC2F11D0853BAA6B7C5D15421F14A318E33C60CE8
 ```
 
 **제거**:
@@ -217,3 +219,9 @@ cargo test
 - **GameSir G7 Pro는 2.4GHz 동글로 연결해도 "유선"으로 나올 수 있습니다.** 동글이 Windows에 자기를 유선 컨트롤러로 알리면 XInput으로는 잔량을 알 수 없습니다. 컨트롤러가 연결된 PC에서 `powershell -ExecutionPolicy Bypass -File tools\gamepad_diag.ps1`를 실행하면 Windows가 컨트롤러를 어떻게 보는지와 다른 방식(Windows.Gaming.Input)으로 잔량을 읽을 수 있는지 확인할 수 있습니다. 여러 XInput 컨트롤러가 연결돼 있으면 Windows가 먼저 잡은 하나만 표시합니다.
 - 작업표시줄 아이콘을 전부 끄면 잔량 부족 알림을 띄울 곳이 없어 알림이 나오지 않습니다.
 - 위젯 아이콘은 Windows 11의 Segoe Fluent Icons 글꼴을 쓰고, Windows 10에서는 Segoe MDL2 Assets로 대신합니다.
+
+## 버전 기록
+
+- **1.0.0** (2026-10-11): 첫 배포 버전
+  - 트레이 아이콘, 바탕화면 위젯, 설정 창, 잔량 부족 알림, 갱신 주기 설정
+  - GameSir G7 Pro는 동글 연결 시 Windows가 유선 Xbox 360 컨트롤러로 인식해 잔량을 표시하지 못함 (알려진 한계 참고)
