@@ -34,7 +34,7 @@ dependencies = [
 
 [[package]]
 name = "razer_battery_tray"
-version = "1.2.0"
+version = "1.2.1"
 dependencies = [
  "serde",
  "serde_json",

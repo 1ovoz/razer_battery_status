@@ -12,7 +12,7 @@ use std::ptr::{null, null_mut};
 use windows_sys::Win32::Foundation::{FreeLibrary, HMODULE};
 use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryExW, LOAD_LIBRARY_SEARCH_SYSTEM32};
 
-use razer_battery_tray::update_info::{is_newer, parse_version_file};
+use razer_battery_tray::update_info::{is_newer, parse_version, parse_version_file};
 
 use crate::tray::wide;
 
@@ -226,7 +226,8 @@ pub fn check_in_child() -> Outcome {
     let mut lines = text.lines();
     match (lines.next(), lines.next()) {
         (Some("UPTODATE"), _) => Outcome::UpToDate,
-        (Some("NEWER"), Some(v)) => Outcome::Newer(v.to_string()),
+        // 결과 파일은 사용자 폴더에 있으니 여기서도 형식을 다시 확인한다 (알림·메뉴에 그대로 표시되므로)
+        (Some("NEWER"), Some(v)) if parse_version(v).is_some() => Outcome::Newer(v.trim().to_string()),
         (Some("FAILED"), msg) => Outcome::Failed(msg.unwrap_or("알 수 없는 오류").to_string()),
         _ => Outcome::Failed("확인 결과를 읽지 못함".into()),
     }
