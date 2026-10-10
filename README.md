@@ -83,6 +83,8 @@ GameSir G7 Pro ──▶ Windows XInput ──▶ 이 프로그램 ──▶ 트
 1. 이 저장소의 [`dist/razer_battery_tray.exe`](dist/razer_battery_tray.exe)를 내려받습니다.
    비공개 저장소라면 GitHub에 로그인한 상태에서 받아야 합니다.
 2. 아무 폴더에나 두면 되지만 `%LOCALAPPDATA%\Programs\RazerBatteryTray\`를 추천합니다.
+   이 폴더는 직접 만들어야 합니다. Win+R → `%LOCALAPPDATA%\Programs` 입력 → 새 폴더 `RazerBatteryTray`를 만들고 exe를 넣으세요.
+   (`Programs` 폴더가 없으면 그것도 만들면 됩니다. 폴더 이름은 아무거나 괜찮습니다.)
    **다운로드 폴더에서 바로 실행하지 마세요.** 다운로드 폴더에는 다른 사이트가 받아 둔 파일이 섞여 있을 수 있습니다.
 3. 실행합니다. 서명되지 않은 프로그램이라 처음에는 Windows SmartScreen이 "Windows의 PC 보호" 창을 띄울 수 있습니다. **추가 정보 → 실행**을 누르면 됩니다.
 4. 트레이 아이콘을 오른쪽 클릭 → 설정 → "Windows 시작 시 자동 실행"을 체크합니다.
