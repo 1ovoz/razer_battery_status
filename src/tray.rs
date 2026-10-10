@@ -307,7 +307,7 @@ impl App {
             self.widget.invalidate();
         }
         let c = &self.config;
-        let tiles: Vec<_> = (0..DEVICES)
+        let tiles: Vec<_> = c.order.iter().copied()
             .filter(|&i| c.show_widget[i])
             .map(|i| {
                 let name = c.display_name(i, SHORT_NAMES[i]);
@@ -471,7 +471,7 @@ fn device_visual(d: &DeviceState) -> Visual {
     match (d.status, d.level) {
         (Status::Charging, Some(l)) => text(BLUE, WHITE, l.to_string()),
         (Status::Discharging, Some(l)) if l >= 50 => text(GREEN, WHITE, l.to_string()),
-        (Status::Discharging, Some(l)) if l >= 20 => text(YELLOW, BLACK, l.to_string()),
+        (Status::Discharging, Some(l)) if l >= 15 => text(YELLOW, BLACK, l.to_string()),
         (Status::Discharging, Some(l)) => text(RED, WHITE, l.to_string()),
         _ => text(GRAY, WHITE, "-"),
     }

@@ -4,7 +4,8 @@
 //! 다른 창·게임 위로는 절대 올라오지 않는다. 포커스도 가져가지 않는다.
 //! (Progman의 자식으로 넣으면 Windows 11 25H2에서는 반투명 창이 그려지지 않아 쓰지 않는다)
 //!
-//! 마우스를 올리면 오른쪽 위에 톱니바퀴(설정)와 세로 배경 불투명도 바가 나타난다.
+//! 마우스를 올리면 타일 바깥 옆쪽에 톱니바퀴(설정)와 세로 배경 불투명도 바가 나타난다
+//! (평소에는 그 자리가 완전히 투명). 화면 오른쪽에 있으면 왼쪽에, 왼쪽에 있으면 오른쪽에 붙는다.
 //! 휠로 전체 크기, 오른쪽 클릭 메뉴로 배치·크기를 바꾼다.
 
 use std::mem::{size_of, zeroed};
@@ -73,8 +74,9 @@ pub struct Style {
     pub scale: u16,
 }
 
+/// 50% 이상 초록, 15~49% 노랑, 15% 미만 빨강
 fn level_color(l: u8) -> Rgb {
-    if l >= 50 { GREEN } else if l >= 20 { YELLOW } else { RED }
+    if l >= 50 { GREEN } else if l >= 15 { YELLOW } else { RED }
 }
 
 pub fn device_tile(d: &DeviceState, name: &str) -> Tile {
@@ -127,7 +129,9 @@ pub struct Widget {
     drawn: Option<(Vec<Tile>, Style, u32, bool)>,
     /// 마지막으로 받은 내용 (호버가 바뀌면 이걸로 다시 그림)
     last: Option<(Vec<Tile>, Style)>,
-    size: (i32, i32),
+    /// 타일 영역 크기와, 창 안에서 타일 영역이 시작하는 x (패널이 왼쪽이면 0보다 큼)
+    tiles_size: (i32, i32),
+    tile_off: i32,
     pub hovered: bool,
     pub dragging_slider: bool,
     /// 창 기준 좌표: 톱니바퀴 / 불투명도 바 (호버 중에만 유효)
@@ -165,7 +169,7 @@ impl Widget {
         let r = RECT { left: 0, top: 0, right: 0, bottom: 0 };
         Widget {
             hwnd: null_mut(), visible: false, initial_pos: None, drawn: None, last: None,
-            size: (0, 0), hovered: false, dragging_slider: false, gear: r, slider: r,
+            tiles_size: (0, 0), tile_off: 0, hovered: false, dragging_slider: false, gear: r, slider: r,
         }
     }
 
@@ -192,6 +196,12 @@ impl Widget {
         let mut r: RECT = unsafe { zeroed() };
         unsafe { GetWindowRect(self.hwnd, &mut r) };
         (r.left, r.top)
+    }
+
+    /// 타일 영역의 화면 좌표 (설정에 저장하는 위치)
+    pub fn tiles_pos(&self) -> (i32, i32) {
+        let (x, y) = self.pos();
+        (x + self.tile_off, y)
     }
 
     /// 내용·모양·DPI·호버가 바뀌었을 때만 다시 그린다.
@@ -244,82 +254,96 @@ impl Widget {
         unsafe {
             let s = dpi as f32 / 96.0 * style.scale as f32 / 100.0;
             let t = (TILE * s).round() as i32;
+            let tf = t as f32;
             let gap = (GAP * s).round().max(2.0) as i32;
             let n = tiles.len().max(1);
             let cols = style.layout.cols(n);
             let rows = n.div_ceil(cols) as i32;
             let cols = cols as i32;
-            let (w, h) = (cols * t + (cols - 1) * gap, rows * t + (rows - 1) * gap);
+            let (tw, th) = (cols * t + (cols - 1) * gap, rows * t + (rows - 1) * gap);
+
+            // 1) 타일 영역의 화면 위치 정하기
+            let mut moved = None;
+            let (tx, ty) = if let Some(saved) = self.initial_pos.take() {
+                // 첫 렌더: 저장된 위치(화면 안에 있을 때만) 또는 작업 영역 오른쪽 아래
+                let on_screen = |&(x, y): &(i32, i32)| {
+                    !MonitorFromPoint(POINT { x: x + 20, y: y + 20 }, MONITOR_DEFAULTTONULL).is_null()
+                };
+                saved.filter(on_screen).unwrap_or_else(|| {
+                    let mut wa: RECT = zeroed();
+                    SystemParametersInfoW(SPI_GETWORKAREA, 0, &mut wa as *mut RECT as *mut _, 0);
+                    let m = (16.0 * dpi as f32 / 96.0) as i32;
+                    (wa.right - tw - m, wa.bottom - th - m)
+                })
+            } else {
+                let (x, y) = self.tiles_pos();
+                let (ow, oh) = self.tiles_size;
+                if (ow, oh) != (0, 0) && (ow, oh) != (tw, th) {
+                    // 크기가 바뀌면 화면 가장자리 쪽 모서리를 고정 (오른쪽/아래에 있으면 그쪽 기준)
+                    let wa = self.work_area();
+                    let nx = if x + ow / 2 > (wa.left + wa.right) / 2 { x + ow - tw } else { x };
+                    let ny = if y + oh / 2 > (wa.top + wa.bottom) / 2 { y + oh - th } else { y };
+                    if (nx, ny) != (x, y) {
+                        moved = Some((nx, ny));
+                    }
+                    (nx, ny)
+                } else {
+                    (x, y)
+                }
+            };
+
+            // 2) 톱니바퀴·불투명도 바 패널: 화면 가운데 쪽 옆에 붙인다
+            let pw = (tf * 0.22).round() as i32;
+            let wa = self.work_area();
+            let panel_left = tx + tw / 2 > (wa.left + wa.right) / 2;
+            let (w, h) = (tw + gap + pw, th);
+            let tile_off = if panel_left { pw + gap } else { 0 };
+            let px0 = if panel_left { 0 } else { tw + gap };
 
             let hdc_screen = GetDC(null_mut());
             let hdc = CreateCompatibleDC(hdc_screen);
             let (bmp, bits) = dib(hdc, w, h);
             let old = SelectObject(hdc, bmp);
             let px = std::slice::from_raw_parts_mut(bits, (w * h) as usize);
-            px.fill(0);
+            // 호버 중에는 창 전체를 알파 1/255로 채워(눈에 안 보임) 타일 사이 틈에서도 마우스를 놓치지 않게 한다
+            px.fill(if hovered { 0x0100_0000 } else { 0 });
             let mut c = Canvas { px, w, h };
             // 배경 알파가 0이면 클릭이 통과해 잡을 수 없으므로 최소 1/255는 남긴다 (눈에는 안 보임)
             let bg_alpha = (style.bg_opacity as f32 / 100.0).max(1.0 / 255.0);
             for (i, tile) in tiles.iter().enumerate() {
                 let (col, row) = ((i as i32 % cols), (i as i32 / cols));
-                draw_tile(&mut c, col * (t + gap), row * (t + gap), t, tile, bg_alpha);
+                draw_tile(&mut c, tile_off + col * (t + gap), row * (t + gap), t, tile, bg_alpha);
             }
 
-            // 호버: 오른쪽 위 타일 안에 톱니바퀴 + 세로 불투명도 바
-            let tx = (cols - 1) * (t + gap);
-            let tf = t as f32;
-            let gsz = (tf * 0.16) as i32;
-            self.gear = RECT {
-                left: tx + t - gsz - (tf * 0.03) as i32, top: (tf * 0.03) as i32,
-                right: tx + t - (tf * 0.03) as i32, bottom: (tf * 0.03) as i32 + gsz,
-            };
-            let sx = tx + t - (tf * 0.09) as i32;
-            self.slider = RECT {
-                left: sx - (tf * 0.05) as i32, top: self.gear.bottom + (tf * 0.03) as i32,
-                right: sx + (tf * 0.05) as i32, bottom: (tf * 0.86) as i32,
-            };
+            let ph = th.min(2 * t + gap);
+            self.gear = RECT { left: px0, top: 0, right: px0 + pw, bottom: pw };
+            self.slider = RECT { left: px0, top: pw, right: px0 + pw, bottom: ph - pw / 4 };
             if hovered {
-                let g = text_run(ICON_FONT, tf * 0.12, &G_GEAR.to_string());
-                blit(&mut c, &g, (self.gear.left + self.gear.right) / 2, (self.gear.top + self.gear.bottom) / 2, TEXT);
+                let r = pw as f32 * 0.5;
+                for y in 0..ph {
+                    for x in 0..pw {
+                        c.blend(px0 + x, y, TILE_BG, rounded_rect_alpha(x, y, pw, ph, r) * 0.9);
+                    }
+                }
+                let g = text_run(ICON_FONT, pw as f32 * 0.55, &G_GEAR.to_string());
+                blit(&mut c, &g, px0 + pw / 2, pw / 2, TEXT);
                 draw_slider(&mut c, &self.slider, style.bg_opacity, tf);
             }
 
-            // 첫 렌더: 저장된 위치(화면 안에 있을 때만) 또는 작업 영역 오른쪽 아래
-            let mut moved = None;
-            if let Some(saved) = self.initial_pos.take() {
-                let on_screen = |&(x, y): &(i32, i32)| {
-                    !MonitorFromPoint(POINT { x: x + 20, y: y + 20 }, MONITOR_DEFAULTTONULL).is_null()
-                };
-                let (x, y) = saved.filter(on_screen).unwrap_or_else(|| {
-                    let mut wa: RECT = zeroed();
-                    SystemParametersInfoW(SPI_GETWORKAREA, 0, &mut wa as *mut RECT as *mut _, 0);
-                    let m = (16.0 * dpi as f32 / 96.0) as i32;
-                    (wa.right - w - m, wa.bottom - h - m)
-                });
-                SetWindowPos(self.hwnd, null_mut(), x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
-            } else if self.size != (0, 0) && self.size != (w, h) {
-                // 크기가 바뀌면 화면 가장자리 쪽 모서리를 고정 (오른쪽/아래에 있으면 그쪽 기준)
-                let (x, y) = self.pos();
-                let (ow, oh) = self.size;
-                let mut mi: MONITORINFO = zeroed();
-                mi.cbSize = size_of::<MONITORINFO>() as u32;
-                GetMonitorInfoW(MonitorFromWindow(self.hwnd, MONITOR_DEFAULTTONEAREST), &mut mi);
-                let wa = mi.rcWork;
-                let nx = if x + ow / 2 > (wa.left + wa.right) / 2 { x + ow - w } else { x };
-                let ny = if y + oh / 2 > (wa.top + wa.bottom) / 2 { y + oh - h } else { y };
-                if (nx, ny) != (x, y) {
-                    SetWindowPos(self.hwnd, null_mut(), nx, ny, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
-                    moved = Some((nx, ny));
-                }
+            // 3) 창 위치: 타일 영역이 (tx, ty)에 오도록
+            let (wx, wy) = (tx - tile_off, ty);
+            if (wx, wy) != self.pos() {
+                SetWindowPos(self.hwnd, null_mut(), wx, wy, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
             }
-            self.size = (w, h);
+            self.tiles_size = (tw, th);
+            self.tile_off = tile_off;
 
             let size = SIZE { cx: w, cy: h };
             let src = POINT { x: 0, y: 0 };
             let blend = BLENDFUNCTION {
                 BlendOp: AC_SRC_OVER as u8, BlendFlags: 0, SourceConstantAlpha: 255, AlphaFormat: AC_SRC_ALPHA as u8,
             };
-            // 위치는 그대로 두고(pptDst = null) 크기와 내용만 갱신
+            // 위치는 위에서 맞췄으니(pptDst = null) 크기와 내용만 갱신
             UpdateLayeredWindow(self.hwnd, hdc_screen, null(), &size, hdc, &src, 0, &blend, ULW_ALPHA);
             // 레이어드 창은 시스템이 비트맵을 복사해 두므로 우리 쪽 버퍼는 바로 해제
             SelectObject(hdc, old);
@@ -331,6 +355,16 @@ impl Widget {
                 self.show();
             }
             moved
+        }
+    }
+
+    /// 위젯이 있는 모니터의 작업 영역
+    unsafe fn work_area(&self) -> RECT {
+        unsafe {
+            let mut mi: MONITORINFO = zeroed();
+            mi.cbSize = size_of::<MONITORINFO>() as u32;
+            GetMonitorInfoW(MonitorFromWindow(self.hwnd, MONITOR_DEFAULTTONEAREST), &mut mi);
+            mi.rcWork
         }
     }
 }
@@ -502,7 +536,9 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             }
             WM_EXITSIZEMOVE => {
                 with_app(|a| {
-                    let p = a.widget.pos();
+                    let p = a.widget.tiles_pos();
+                    // 화면 반대쪽으로 옮겼으면 패널 방향이 바뀌므로 다시 그림
+                    a.widget.invalidate();
                     a.change_config(|c| c.pos = Some(p));
                 });
                 0
@@ -623,16 +659,12 @@ fn draw_tile(c: &mut Canvas, x0: i32, y0: i32, t: i32, tile: &Tile, bg_alpha: f3
     let (face, em) = if tile.numeric { (NUM_FONT, tf * 0.135) } else { (LABEL_FONT, tf * 0.095) };
     let txt = text_run(face, em, &tile.text);
     let ty = y0 + (cy + tf * 0.12) as i32;
+    blit(c, &txt, x0 + cx as i32, ty, if dim { SUBTEXT } else { TEXT });
+
+    // 충전 중이면 타일 오른쪽 위 모서리에 번개
     if tile.charging {
-        // 번개 + 글자를 한 줄로 가운데 정렬
-        let bolt = text_run(ICON_FONT, em * 0.85, &G_BOLT.to_string());
-        let space = (tf * 0.02) as i32;
-        let total = bolt.ink_w() + space + txt.ink_w();
-        let left = x0 + cx as i32 - total / 2;
-        blit(c, &bolt, left + bolt.ink_w() / 2, ty, BLUE);
-        blit(c, &txt, left + bolt.ink_w() + space + txt.ink_w() / 2, ty, TEXT);
-    } else {
-        blit(c, &txt, x0 + cx as i32, ty, if dim { SUBTEXT } else { TEXT });
+        let bolt = text_run(ICON_FONT, tf * 0.14, &G_BOLT.to_string());
+        blit(c, &bolt, x0 + t - (tf * 0.13) as i32, y0 + (tf * 0.13) as i32, BLUE);
     }
 
     // 4) 아래 기기 이름
@@ -645,12 +677,6 @@ struct Run {
     w: i32,
     cov: Vec<u8>,
     ink: (i32, i32, i32, i32),
-}
-
-impl Run {
-    fn ink_w(&self) -> i32 {
-        self.ink.2 - self.ink.0
-    }
 }
 
 fn text_run(face: &str, em: f32, text: &str) -> Run {

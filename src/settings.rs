@@ -1,4 +1,5 @@
-//! 설정 창 (Win32 기본 컨트롤). 트레이 메뉴나 위젯 톱니바퀴에서 연다.
+//! 설정 창. 트레이 메뉴나 위젯 톱니바퀴에서 연다.
+//! Win32 기본 컨트롤에 어두운 테마를 입히고, 위젯처럼 둥근 카드 위에 배치한다.
 //! 자동 실행은 HKCU\...\Run 레지스트리 값으로 켜고 끈다 (관리자 권한 불필요).
 
 use std::cell::RefCell;
@@ -7,11 +8,13 @@ use std::ptr::{null, null_mut};
 use std::sync::atomic::{AtomicPtr, Ordering};
 
 use windows_sys::Win32::Foundation::*;
+use windows_sys::Win32::Graphics::Dwm::DwmSetWindowAttribute;
 use windows_sys::Win32::Graphics::Gdi::*;
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::Registry::*;
 use windows_sys::Win32::UI::Controls::*;
 use windows_sys::Win32::UI::HiDpi::{AdjustWindowRectExForDpi, GetDpiForSystem};
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, SetFocus};
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
 use razer_battery_tray::config::{Config, Remind, DEVICES};
@@ -29,7 +32,23 @@ thread_local! {
     /// 창을 열 때의 설정 (저장 시 위치·배치처럼 이 창에 없는 값을 보존)
     static BASE: RefCell<Option<(Config, [String; DEVICES])>> = const { RefCell::new(None) };
     static FONT: RefCell<HFONT> = const { RefCell::new(null_mut()) };
+    /// 행 → 장치 번호 (▲▼로 바꾸는 타일 순서)
+    static ORDER: RefCell<[usize; DEVICES]> = RefCell::new(std::array::from_fn(|i| i));
+    /// 배경·카드·입력칸 브러시
+    static BRUSHES: RefCell<Option<(HBRUSH, HBRUSH, HBRUSH)>> = const { RefCell::new(None) };
+    /// 카드 사각형 (96 DPI 기준 좌표를 DPI에 맞춘 값)
+    static CARDS: RefCell<Vec<RECT>> = const { RefCell::new(Vec::new()) };
 }
+
+// 색 (위젯과 같은 계열)
+const fn rgb(r: u8, g: u8, b: u8) -> COLORREF {
+    r as u32 | (g as u32) << 8 | (b as u32) << 16
+}
+const C_WINDOW: COLORREF = rgb(16, 16, 18);
+const C_CARD: COLORREF = rgb(30, 30, 34);
+const C_EDIT: COLORREF = rgb(44, 44, 50);
+const C_TEXT: COLORREF = rgb(236, 236, 240);
+const C_SUBTEXT: COLORREF = rgb(150, 150, 155);
 
 const ID_AUTOSTART: i32 = 100;
 const ID_WIDGET: i32 = 200; // +i
@@ -39,6 +58,10 @@ const ID_THRESHOLD: i32 = 300;
 const ID_REMIND: i32 = 301;
 const ID_OPACITY: i32 = 302;
 const ID_OPACITY_LABEL: i32 = 303;
+const ID_NAME: i32 = 230; // +행: 장치 이름 글자
+const ID_UP: i32 = 240; // +행
+const ID_DOWN: i32 = 250; // +행
+const ID_HEADER: i32 = 500; // 이 번호 이상인 글자는 흐린 색
 
 // windows-sys에서 다른 기능 묶음에 있는 상수들
 const SS_CENTER: u32 = 0x1;
@@ -93,7 +116,6 @@ pub fn open(config: Config, names: [String; DEVICES]) {
             hInstance: hinst,
             lpszClassName: class.as_ptr(),
             hCursor: LoadCursorW(null_mut(), IDC_ARROW),
-            hbrBackground: (COLOR_BTNFACE + 1) as usize as HBRUSH,
             ..zeroed()
         };
         RegisterClassW(&wc);
@@ -101,12 +123,14 @@ pub fn open(config: Config, names: [String; DEVICES]) {
         let dpi = GetDpiForSystem();
         let s = |v: i32| v * dpi as i32 / 96;
         let style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
-        let mut r = RECT { left: 0, top: 0, right: s(570), bottom: s(370) };
+        let mut r = RECT { left: 0, top: 0, right: s(600), bottom: s(478) };
         AdjustWindowRectExForDpi(&mut r, style, 0, 0, dpi);
         let (w, h) = (r.right - r.left, r.bottom - r.top);
         let x = (GetSystemMetrics(SM_CXSCREEN) - w) / 2;
         let y = (GetSystemMetrics(SM_CYSCREEN) - h) / 2;
 
+        ORDER.with(|o| *o.borrow_mut() = config.order);
+        BRUSHES.with(|b| *b.borrow_mut() = Some((CreateSolidBrush(C_WINDOW), CreateSolidBrush(C_CARD), CreateSolidBrush(C_EDIT))));
         BASE.with(|b| *b.borrow_mut() = Some((config, names)));
         let hwnd = CreateWindowExW(
             0, class.as_ptr(), wide("Razer 배터리 설정").as_ptr(), style,
@@ -116,6 +140,10 @@ pub fn open(config: Config, names: [String; DEVICES]) {
             return;
         }
         HWND_SETTINGS.store(hwnd, Ordering::Relaxed);
+        // 어두운 제목 표시줄 (Windows 10 20H1+), 제목 표시줄 색을 배경색과 맞춤 (Windows 11)
+        let dark: u32 = 1;
+        DwmSetWindowAttribute(hwnd, 20, &dark as *const u32 as *const _, 4);
+        DwmSetWindowAttribute(hwnd, 35, &C_WINDOW as *const u32 as *const _, 4);
         build_controls(hwnd, dpi);
         ShowWindow(hwnd, SW_SHOWNORMAL);
         SetForegroundWindow(hwnd);
@@ -129,7 +157,75 @@ unsafe fn control(parent: HWND, class: &str, text: &str, style: u32, x: i32, y: 
             x, y, w, h, parent, id as usize as HMENU, GetModuleHandleW(null()), null(),
         );
         FONT.with(|f| SendMessageW(hwnd, WM_SETFONT, *f.borrow() as WPARAM, 1));
+        // 어두운 테마 (콤보·입력칸은 CFD, 버튼·체크박스는 Explorer)
+        let theme = match class {
+            "COMBOBOX" | "EDIT" => Some("DarkMode_CFD"),
+            "BUTTON" => Some("DarkMode_Explorer"),
+            _ => None,
+        };
+        if let Some(t) = theme {
+            SetWindowTheme(hwnd, wide(t).as_ptr(), null());
+        }
         hwnd
+    }
+}
+
+/// 장치 한 행의 입력값
+#[derive(Clone, Default)]
+struct Row {
+    widget: bool,
+    tray: bool,
+    nick: String,
+}
+
+/// 화면의 행들을 장치 번호 순으로 읽는다
+unsafe fn read_rows(hwnd: HWND) -> [Row; DEVICES] {
+    unsafe {
+        let order = ORDER.with(|o| *o.borrow());
+        let mut rows: [Row; DEVICES] = Default::default();
+        for (r, &d) in order.iter().enumerate() {
+            let r = r as i32;
+            rows[d] = Row {
+                widget: checked(hwnd, ID_WIDGET + r),
+                tray: checked(hwnd, ID_TRAY + r),
+                nick: text(hwnd, ID_NICK + r),
+            };
+        }
+        rows
+    }
+}
+
+/// 장치별 입력값을 현재 순서대로 화면 행에 쓴다
+unsafe fn write_rows(hwnd: HWND, rows: &[Row; DEVICES]) {
+    unsafe {
+        let order = ORDER.with(|o| *o.borrow());
+        let names = BASE.with(|b| b.borrow().as_ref().map(|(_, n)| n.clone())).unwrap_or_default();
+        let check = |id: i32, on: bool| {
+            SendMessageW(item(hwnd, id), BM_SETCHECK, if on { BST_CHECKED } else { BST_UNCHECKED } as WPARAM, 0);
+        };
+        for (r, &d) in order.iter().enumerate() {
+            let r = r as i32;
+            SetWindowTextW(item(hwnd, ID_NAME + r), wide(&names[d]).as_ptr());
+            check(ID_WIDGET + r, rows[d].widget);
+            check(ID_TRAY + r, rows[d].tray);
+            SetWindowTextW(item(hwnd, ID_NICK + r), wide(&rows[d].nick).as_ptr());
+            EnableWindow(item(hwnd, ID_UP + r), (r > 0) as i32);
+            EnableWindow(item(hwnd, ID_DOWN + r), (r < DEVICES as i32 - 1) as i32);
+        }
+    }
+}
+
+/// 행 r을 위(-1)/아래(+1)로 옮긴다
+unsafe fn move_row(hwnd: HWND, r: usize, dir: isize) {
+    unsafe {
+        let to = r as isize + dir;
+        if to < 0 || to >= DEVICES as isize {
+            return;
+        }
+        let rows = read_rows(hwnd);
+        ORDER.with(|o| o.borrow_mut().swap(r, to as usize));
+        write_rows(hwnd, &rows);
+        SetFocus(item(hwnd, if dir < 0 { ID_UP } else { ID_DOWN } + to as i32));
     }
 }
 
@@ -141,34 +237,55 @@ unsafe fn build_controls(hwnd: HWND, dpi: u32) {
             CLIP_DEFAULT_PRECIS as u32, CLEARTYPE_QUALITY as u32, DEFAULT_PITCH as u32, wide("Malgun Gothic").as_ptr(),
         );
         FONT.with(|f| *f.borrow_mut() = font);
-        let Some((cfg, names)) = BASE.with(|b| b.borrow().clone()) else { return };
+        let Some((cfg, _)) = BASE.with(|b| b.borrow().clone()) else { return };
         let check = |h: HWND, on: bool| SendMessageW(h, BM_SETCHECK, if on { BST_CHECKED } else { BST_UNCHECKED } as WPARAM, 0);
         let cb = (BS_AUTOCHECKBOX | WS_TABSTOP as i32) as u32;
+        let label = |text: &str, x: i32, y: i32, w: i32, id: i32| {
+            control(hwnd, "STATIC", text, SS_CENTERIMAGE, s(x), s(y), s(w), s(28), id)
+        };
 
-        let h = control(hwnd, "BUTTON", "Windows 시작 시 자동 실행", cb, s(16), s(12), s(400), s(24), ID_AUTOSTART);
+        // 카드 1: 일반
+        CARDS.with(|c| {
+            *c.borrow_mut() = vec![
+                RECT { left: s(12), top: s(12), right: s(588), bottom: s(60) },
+                RECT { left: s(12), top: s(70), right: s(588), bottom: s(284) },
+                RECT { left: s(12), top: s(294), right: s(588), bottom: s(422) },
+            ]
+        });
+        let h = control(hwnd, "BUTTON", "", cb, s(28), s(22), s(20), s(28), ID_AUTOSTART);
         check(h, autostart_enabled());
+        label("Windows 시작 시 자동 실행", 54, 22, 300, -1);
 
-        control(hwnd, "STATIC", "장치", 0, s(16), s(48), s(170), s(20), -1);
-        control(hwnd, "STATIC", "위젯", SS_CENTER, s(186), s(48), s(56), s(20), -1);
-        control(hwnd, "STATIC", "작업표시줄", SS_CENTER, s(244), s(48), s(80), s(20), -1);
-        control(hwnd, "STATIC", "표시 이름 (비우면 기본 이름)", 0, s(334), s(48), s(230), s(20), -1);
-        for i in 0..DEVICES {
-            let y = s(74 + i as i32 * 32);
-            control(hwnd, "STATIC", &names[i], SS_CENTERIMAGE, s(16), y, s(170), s(26), -1);
-            let h = control(hwnd, "BUTTON", "", cb, s(206), y, s(20), s(26), ID_WIDGET + i as i32);
-            check(h, cfg.show_widget[i]);
-            let h = control(hwnd, "BUTTON", "", cb, s(276), y, s(20), s(26), ID_TRAY + i as i32);
-            check(h, cfg.show_tray[i]);
+        // 카드 2: 장치 (순서 ▲▼, 이름, 위젯, 작업표시줄, 표시 이름)
+        label("순서", 28, 80, 50, ID_HEADER);
+        label("장치", 88, 80, 160, ID_HEADER + 1);
+        control(hwnd, "STATIC", "위젯", SS_CENTER | SS_CENTERIMAGE, s(256), s(80), s(56), s(28), ID_HEADER + 2);
+        control(hwnd, "STATIC", "작업표시줄", SS_CENTER | SS_CENTERIMAGE, s(316), s(80), s(84), s(28), ID_HEADER + 3);
+        label("표시 이름 (닉네임)", 410, 80, 170, ID_HEADER + 4);
+        for r in 0..DEVICES as i32 {
+            let y = 112 + r * 42;
+            control(hwnd, "BUTTON", "▲", WS_TABSTOP, s(28), s(y), s(26), s(28), ID_UP + r);
+            control(hwnd, "BUTTON", "▼", WS_TABSTOP, s(56), s(y), s(26), s(28), ID_DOWN + r);
+            label("", 88, y, 166, ID_NAME + r);
+            control(hwnd, "BUTTON", "", cb, s(276), s(y), s(20), s(28), ID_WIDGET + r);
+            control(hwnd, "BUTTON", "", cb, s(350), s(y), s(20), s(28), ID_TRAY + r);
             let h = control(
-                hwnd, "EDIT", &cfg.nickname[i], (WS_BORDER | WS_TABSTOP) | ES_AUTOHSCROLL as u32,
-                s(334), y, s(220), s(26), ID_NICK + i as i32,
+                hwnd, "EDIT", "", WS_TABSTOP | ES_AUTOHSCROLL as u32,
+                s(410), s(y + 2), s(166), s(24), ID_NICK + r,
             );
             SendMessageW(h, EM_LIMITTEXT, 40, 0);
         }
+        let rows: [Row; DEVICES] = std::array::from_fn(|d| Row {
+            widget: cfg.show_widget[d],
+            tray: cfg.show_tray[d],
+            nick: cfg.nickname[d].clone(),
+        });
+        write_rows(hwnd, &rows);
 
+        // 카드 3: 알림·위젯 모양
         let combo_style = (WS_TABSTOP | WS_VSCROLL) | CBS_DROPDOWNLIST as u32;
-        control(hwnd, "STATIC", "배터리 부족 기준", SS_CENTERIMAGE, s(16), s(212), s(170), s(26), -1);
-        let h = control(hwnd, "COMBOBOX", "", combo_style, s(206), s(212), s(130), s(300), ID_THRESHOLD);
+        label("배터리 부족 기준", 28, 306, 180, -1);
+        let h = control(hwnd, "COMBOBOX", "", combo_style, s(220), s(306), s(150), s(300), ID_THRESHOLD);
         for (i, t) in THRESHOLDS.iter().enumerate() {
             SendMessageW(h, CB_ADDSTRING, 0, wide(&format!("{t}% 미만")).as_ptr() as LPARAM);
             if *t == cfg.low_threshold {
@@ -179,8 +296,8 @@ unsafe fn build_controls(hwnd: HWND, dpi: u32) {
             SendMessageW(h, CB_SETCURSEL, 2, 0); // 15%
         }
 
-        control(hwnd, "STATIC", "부족 알림", SS_CENTERIMAGE, s(16), s(248), s(170), s(26), -1);
-        let h = control(hwnd, "COMBOBOX", "", combo_style, s(206), s(248), s(130), s(300), ID_REMIND);
+        label("부족 알림", 28, 344, 180, -1);
+        let h = control(hwnd, "COMBOBOX", "", combo_style, s(220), s(344), s(150), s(300), ID_REMIND);
         for (i, r) in Remind::CHOICES.iter().enumerate() {
             SendMessageW(h, CB_ADDSTRING, 0, wide(&r.label()).as_ptr() as LPARAM);
             if *r == cfg.remind {
@@ -191,15 +308,14 @@ unsafe fn build_controls(hwnd: HWND, dpi: u32) {
             SendMessageW(h, CB_SETCURSEL, 5, 0); // 1번만
         }
 
-        control(hwnd, "STATIC", "위젯 배경 불투명도", SS_CENTERIMAGE, s(16), s(284), s(170), s(28), -1);
-        let h = control(hwnd, "msctls_trackbar32", "", WS_TABSTOP | TBS_NOTICKS as u32, s(200), s(284), s(290), s(30), ID_OPACITY);
+        label("위젯 배경 불투명도", 28, 382, 180, -1);
+        let h = control(hwnd, "msctls_trackbar32", "", WS_TABSTOP | TBS_NOTICKS as u32, s(214), s(382), s(300), s(28), ID_OPACITY);
         SendMessageW(h, TBM_SETRANGE, 1, (100 << 16) as LPARAM);
         SendMessageW(h, TBM_SETPOS, 1, cfg.bg_opacity as LPARAM);
-        control(hwnd, "STATIC", &format!("{}%", cfg.bg_opacity), SS_CENTERIMAGE, s(496), s(284), s(60), s(28), ID_OPACITY_LABEL);
+        label(&format!("{}%", cfg.bg_opacity), 520, 382, 60, ID_OPACITY_LABEL);
 
-        let btn = WS_TABSTOP;
-        control(hwnd, "BUTTON", "저장", btn | BS_DEFPUSHBUTTON as u32, s(344), s(328), s(100), s(30), IDOK);
-        control(hwnd, "BUTTON", "취소", btn, s(454), s(328), s(100), s(30), IDCANCEL);
+        control(hwnd, "BUTTON", "저장", WS_TABSTOP | BS_DEFPUSHBUTTON as u32, s(372), s(436), s(100), s(32), IDOK);
+        control(hwnd, "BUTTON", "취소", WS_TABSTOP, s(482), s(436), s(100), s(32), IDCANCEL);
     }
 }
 
@@ -223,11 +339,13 @@ unsafe fn save(hwnd: HWND) {
     unsafe {
         // 위젯에서 바꾼 배치·크기·위치 등은 지금 값을 유지하고, 이 창의 항목만 덮어쓴다
         let Some(mut cfg) = with_app(|a| a.config.clone()) else { return };
-        for i in 0..DEVICES {
-            cfg.show_widget[i] = checked(hwnd, ID_WIDGET + i as i32);
-            cfg.show_tray[i] = checked(hwnd, ID_TRAY + i as i32);
-            cfg.nickname[i] = text(hwnd, ID_NICK + i as i32).trim().to_string();
+        let rows = read_rows(hwnd);
+        for (d, row) in rows.iter().enumerate() {
+            cfg.show_widget[d] = row.widget;
+            cfg.show_tray[d] = row.tray;
+            cfg.nickname[d] = row.nick.trim().to_string();
         }
+        cfg.order = ORDER.with(|o| *o.borrow());
         let t = SendMessageW(item(hwnd, ID_THRESHOLD), CB_GETCURSEL, 0, 0);
         cfg.low_threshold = THRESHOLDS.get(t as usize).copied().unwrap_or(15);
         let r = SendMessageW(item(hwnd, ID_REMIND), CB_GETCURSEL, 0, 0);
@@ -247,6 +365,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
         match msg {
             WM_COMMAND => {
                 match (wp & 0xFFFF) as i32 {
+                    id if (ID_UP..ID_UP + DEVICES as i32).contains(&id) => move_row(hwnd, (id - ID_UP) as usize, -1),
+                    id if (ID_DOWN..ID_DOWN + DEVICES as i32).contains(&id) => move_row(hwnd, (id - ID_DOWN) as usize, 1),
                     IDOK => {
                         save(hwnd);
                         DestroyWindow(hwnd);
@@ -263,6 +383,40 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 SetWindowTextW(item(hwnd, ID_OPACITY_LABEL), wide(&format!("{v}%")).as_ptr());
                 0
             }
+            WM_PAINT => {
+                let mut ps: PAINTSTRUCT = zeroed();
+                let hdc = BeginPaint(hwnd, &mut ps);
+                if let Some((bg, card, _)) = BRUSHES.with(|b| *b.borrow()) {
+                    FillRect(hdc, &ps.rcPaint, bg);
+                    let old_brush = SelectObject(hdc, card);
+                    let old_pen = SelectObject(hdc, GetStockObject(NULL_PEN));
+                    let radius = 14 * GetDpiForSystem() as i32 / 96;
+                    CARDS.with(|c| {
+                        for r in c.borrow().iter() {
+                            RoundRect(hdc, r.left, r.top, r.right, r.bottom, radius, radius);
+                        }
+                    });
+                    SelectObject(hdc, old_pen);
+                    SelectObject(hdc, old_brush);
+                }
+                EndPaint(hwnd, &ps);
+                0
+            }
+            WM_ERASEBKGND => 1,
+            // 컨트롤 글자·배경색: 카드 위 글자는 카드색, 입력칸은 조금 밝게
+            WM_CTLCOLORSTATIC | WM_CTLCOLORBTN | WM_CTLCOLOREDIT | WM_CTLCOLORLISTBOX => {
+                let hdc = wp as HDC;
+                let Some((_, card, edit)) = BRUSHES.with(|b| *b.borrow()) else { return 0 };
+                let id = GetDlgCtrlID(lp as HWND);
+                let (fg, bk, brush) = match msg {
+                    WM_CTLCOLOREDIT | WM_CTLCOLORLISTBOX => (C_TEXT, C_EDIT, edit),
+                    _ if id >= ID_HEADER => (C_SUBTEXT, C_CARD, card),
+                    _ => (C_TEXT, C_CARD, card),
+                };
+                SetTextColor(hdc, fg);
+                SetBkColor(hdc, bk);
+                brush as LRESULT
+            }
             WM_CLOSE => {
                 DestroyWindow(hwnd);
                 0
@@ -274,6 +428,13 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                     *f.borrow_mut() = null_mut();
                 });
                 BASE.with(|b| *b.borrow_mut() = None);
+                BRUSHES.with(|b| {
+                    if let Some((a, c, e)) = b.borrow_mut().take() {
+                        DeleteObject(a);
+                        DeleteObject(c);
+                        DeleteObject(e);
+                    }
+                });
                 0
             }
             _ => DefWindowProcW(hwnd, msg, wp, lp),

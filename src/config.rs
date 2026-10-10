@@ -66,6 +66,8 @@ impl Layout {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Config {
+    /// 위젯 타일 순서 (장치 번호의 순열)
+    pub order: [usize; DEVICES],
     pub show_widget: [bool; DEVICES],
     pub show_tray: [bool; DEVICES],
     /// 비어 있으면 기본 이름
@@ -89,6 +91,7 @@ pub const SCALE_MAX: u16 = 200;
 impl Default for Config {
     fn default() -> Self {
         Self {
+            order: std::array::from_fn(|i| i),
             show_widget: [true; DEVICES],
             show_tray: [true; DEVICES],
             nickname: Default::default(),
@@ -120,6 +123,14 @@ impl Config {
             let Some((k, v)) = line.split_once('=') else { continue };
             let (k, v) = (k.trim(), v.trim_end_matches('\r'));
             match k {
+                "order" => {
+                    let v: Vec<usize> = v.split(',').filter_map(|p| p.trim().parse().ok()).collect();
+                    // 0..DEVICES를 한 번씩 담은 순열일 때만 받아들인다
+                    let mut seen = [false; DEVICES];
+                    if v.len() == DEVICES && v.iter().all(|&i| i < DEVICES && !std::mem::replace(&mut seen[i], true)) {
+                        c.order.copy_from_slice(&v);
+                    }
+                }
                 "show_widget" => parse_bools(v, &mut c.show_widget),
                 "show_tray" => parse_bools(v, &mut c.show_tray),
                 "low_threshold" => c.low_threshold = v.parse().unwrap_or(15).clamp(1, 99),
@@ -151,7 +162,8 @@ impl Config {
 
     pub fn serialize(&self) -> String {
         let mut s = format!(
-            "show_widget={}\nshow_tray={}\nlow_threshold={}\nremind={}\nbg_opacity={}\nlayout={}\nscale={}\nwidget_visible={}\n",
+            "order={}\nshow_widget={}\nshow_tray={}\nlow_threshold={}\nremind={}\nbg_opacity={}\nlayout={}\nscale={}\nwidget_visible={}\n",
+            self.order.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(","),
             bools(&self.show_widget),
             bools(&self.show_tray),
             self.low_threshold,
@@ -238,6 +250,7 @@ mod tests {
     #[test]
     fn roundtrip() {
         let mut c = Config::default();
+        c.order = [2, 0, 3, 1];
         c.show_widget[1] = false;
         c.show_tray = [true, false, true, false];
         c.nickname[2] = "내 마우스 = 메인".into();
@@ -261,6 +274,14 @@ mod tests {
         assert_eq!(c.remind, Remind::Once);
         assert_eq!(c.layout, Layout::Grid);
         assert_eq!(c.show_tray, [false, true, true, true]);
+    }
+
+    #[test]
+    fn order_must_be_permutation() {
+        assert_eq!(Config::parse("order=3,2,1,0").order, [3, 2, 1, 0]);
+        assert_eq!(Config::parse("order=0,0,1,2").order, [0, 1, 2, 3]);
+        assert_eq!(Config::parse("order=0,1,2").order, [0, 1, 2, 3]);
+        assert_eq!(Config::parse("order=0,1,2,9").order, [0, 1, 2, 3]);
     }
 
     #[test]
