@@ -18,7 +18,7 @@ use razer_battery_tray::update_info::{is_newer, parse_latest};
 
 use crate::tray::wide;
 
-/// 업데이트 파일 위치. RBT_UPDATE_BASE 환경 변수로 바꿀 수 있다(로컬 테스트용).
+/// 업데이트 파일 위치. 로컬 테스트용으로 RBT_UPDATE_BASE 환경 변수로 바꿀 수 있지만 localhost만 허용한다.
 const UPDATE_BASE: &str = "https://raw.githubusercontent.com/1ovoz/razer_battery_status/main/dist/";
 
 /// 서명 확인용 ECDSA P-256 공개 키 (X || Y). 비밀 키는 개발 PC에만 있다.
@@ -308,13 +308,35 @@ pub fn check_in_child() -> Outcome {
     }
 }
 
+/// 버전이 맞지 않는 업데이트를 반복해서 받지 않도록 건너뛸 버전을 적어 두는 파일
+fn skip_path() -> Option<PathBuf> {
+    Some(update_dir()?.join("skip_version.txt"))
+}
+
+/// 이 버전은 앞으로 자동 업데이트하지 않는다 (받은 exe의 실제 버전이 latest.txt와 달랐을 때)
+pub fn skip_version(version: &str) {
+    if let Some(p) = skip_path() {
+        if let Some(dir) = p.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let _ = std::fs::write(p, version);
+    }
+}
+
 fn check_inner(current: &str) -> Result<Outcome, String> {
-    let base = std::env::var("RBT_UPDATE_BASE").unwrap_or_else(|_| UPDATE_BASE.to_string());
+    let base = match std::env::var("RBT_UPDATE_BASE") {
+        Ok(b) if b.starts_with("http://localhost:") || b.starts_with("http://127.0.0.1:") => b,
+        _ => UPDATE_BASE.to_string(),
+    };
     let http = Http::load()?;
     let text = http.get(&format!("{base}latest.txt"), MAX_LATEST)?;
     let latest = parse_latest(&String::from_utf8_lossy(&text)).ok_or("latest.txt 형식 오류")?;
     if !is_newer(&latest.version, current) {
         return Ok(Outcome::UpToDate);
+    }
+    let skipped = skip_path().and_then(|p| std::fs::read_to_string(p).ok()).unwrap_or_default();
+    if skipped.trim() == latest.version {
+        return Err(format!("{}은 버전이 맞지 않아 건너뜁니다 (다음 버전을 기다림)", latest.version));
     }
 
     let crypto = Crypto::load()?;

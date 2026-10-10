@@ -138,9 +138,11 @@ pub fn run() {
             return;
         }
         MUTEX.store(mutex, Ordering::Relaxed);
-        // 업데이트로 다시 시작됐으면: --updated-from <이전 버전>
+        // 업데이트로 다시 시작됐으면: --updated-from <이전 버전> --updated-to <기대한 버전>
         let args: Vec<String> = std::env::args().collect();
-        let updated_from = args.iter().position(|a| a == "--updated-from").and_then(|i| args.get(i + 1).cloned());
+        let arg = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1).cloned());
+        let updated_from = arg("--updated-from");
+        let updated_to = arg("--updated-to");
         SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
 
         let hinst = GetModuleHandleW(null());
@@ -188,7 +190,14 @@ pub fn run() {
         if let Some(prev) = updated_from {
             app.old_exe = std::env::current_exe().ok().map(|e| old_exe_path(&e));
             app.clean_old_exe();
-            app.notify(usize::MAX, "업데이트 완료", &format!("버전 {VERSION}로 업데이트했습니다 (이전 {prev})"), false);
+            match updated_to {
+                // 받은 exe의 실제 버전이 latest.txt와 다르면(배포 실수) 그 버전은 다시 받지 않는다
+                Some(expected) if expected != VERSION => {
+                    crate::updater::skip_version(&expected);
+                    write_update_log(&format!("받은 파일 버전({VERSION})이 기대({expected})와 달라 {expected}은 건너뜀"));
+                }
+                _ => app.notify(usize::MAX, "업데이트 완료", &format!("버전 {VERSION}로 업데이트했습니다 (이전 {prev})"), false),
+            }
         }
         APP.with(|a| *a.borrow_mut() = Some(app));
 
@@ -591,7 +600,7 @@ impl App {
                     self.notify(usize::MAX, "업데이트 확인 실패", &e, true);
                 }
             }
-            Outcome::Ready { version, path } => match self.apply_update(&path) {
+            Outcome::Ready { version, path } => match self.apply_update(&path, &version) {
                 Ok(()) => write_update_log(&format!("{VERSION} → {version} 교체, 다시 시작")),
                 Err(e) => {
                     write_update_log(&format!("교체 실패: {e}"));
@@ -603,7 +612,7 @@ impl App {
 
     /// 검증된 새 exe로 교체하고 다시 시작한다.
     /// 실행 중인 exe는 지울 수 없지만 이름은 바꿀 수 있으므로: 현재 → .old, 새 파일 → 원래 이름.
-    fn apply_update(&mut self, new_exe: &Path) -> Result<(), String> {
+    fn apply_update(&mut self, new_exe: &Path, new_version: &str) -> Result<(), String> {
         let exe = std::env::current_exe().map_err(|e| e.to_string())?;
         let old = old_exe_path(&exe);
         let _ = std::fs::remove_file(&old);
@@ -617,7 +626,10 @@ impl App {
         if !mutex.is_null() {
             unsafe { CloseHandle(mutex) };
         }
-        if let Err(e) = std::process::Command::new(&exe).arg("--updated-from").arg(VERSION).spawn() {
+        let spawned = std::process::Command::new(&exe)
+            .args(["--updated-from", VERSION, "--updated-to", new_version])
+            .spawn();
+        if let Err(e) = spawned {
             // 새 버전을 못 띄우면 이전 버전으로 되돌리고 계속 실행
             let _ = std::fs::remove_file(&exe);
             let _ = std::fs::rename(&old, &exe);
