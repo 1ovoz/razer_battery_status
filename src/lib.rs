@@ -3,4 +3,5 @@
 pub mod config;
 pub mod gamepad;
 pub mod parser;
+pub mod update_info;
 pub mod watcher;

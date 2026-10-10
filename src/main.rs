@@ -3,6 +3,8 @@
 #[cfg(windows)]
 mod tray;
 #[cfg(windows)]
+mod updater;
+#[cfg(windows)]
 mod settings;
 #[cfg(windows)]
 mod syslib;

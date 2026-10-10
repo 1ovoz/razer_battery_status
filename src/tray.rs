@@ -2,7 +2,9 @@
 
 use std::cell::RefCell;
 use std::ffi::c_void;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicPtr};
 use std::mem::{size_of, zeroed};
 use std::ptr::{null, null_mut};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -29,6 +31,15 @@ const TIMER_ID: usize = 1;
 const IDM_EXIT: usize = 1;
 const IDM_WIDGET: usize = 2;
 const IDM_SETTINGS: usize = 3;
+const IDM_UPDATE: usize = 4;
+/// 업데이트 확인: 시작 1분 뒤 한 번, 그 뒤로 하루에 한 번
+const TIMER_UPDATE_FIRST: usize = 2;
+const TIMER_UPDATE: usize = 3;
+const UPDATE_FIRST_MS: u32 = 60_000;
+const UPDATE_EVERY_MS: u32 = 24 * 60 * 60 * 1000;
+/// 업데이트 확인 스레드가 끝났다는 알림
+const WM_UPDATE_DONE: u32 = WM_APP + 3;
+const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// 설정 창 열기 요청 (위젯 등에서 보냄 — 메시지로 미뤄서 다른 처리 중에 창을 만들지 않게)
 const WM_OPEN_SETTINGS: u32 = WM_APP + 2;
 
@@ -47,6 +58,11 @@ fn short_name(i: usize) -> &'static str {
 }
 
 static TASKBAR_CREATED: AtomicU32 = AtomicU32::new(0);
+/// 중복 실행 방지 뮤텍스 (업데이트 후 새 프로세스를 띄우기 전에 놓는다)
+static MUTEX: AtomicPtr<c_void> = AtomicPtr::new(null_mut());
+static UPDATE_BUSY: AtomicBool = AtomicBool::new(false);
+/// 업데이트 확인 결과 (스레드 → 메인 스레드), bool = 사용자가 직접 누른 확인인지
+static UPDATE_RESULT: Mutex<Option<(crate::updater::Outcome, bool)>> = Mutex::new(None);
 
 type Rgb = (u8, u8, u8);
 const WHITE: Rgb = (255, 255, 255);
@@ -87,6 +103,8 @@ pub(crate) struct App {
     drawn: [Option<Visual>; ICONS],
     tips: [String; ICONS],
     pub widget: Widget,
+    /// 업데이트 직후: 지울 이전 exe (이전 프로세스가 끝날 때까지 몇 번 다시 시도)
+    old_exe: Option<PathBuf>,
 }
 
 thread_local! {
@@ -110,10 +128,14 @@ pub fn run() {
     unsafe {
         // 중복 실행 방지
         let name = wide("Local\\RazerBatteryTray.SingleInstance");
-        let _mutex = CreateMutexW(null(), 0, name.as_ptr());
+        let mutex = CreateMutexW(null(), 0, name.as_ptr());
         if GetLastError() == ERROR_ALREADY_EXISTS {
             return;
         }
+        MUTEX.store(mutex, Ordering::Relaxed);
+        // 업데이트로 다시 시작됐으면: --updated-from <이전 버전>
+        let args: Vec<String> = std::env::args().collect();
+        let updated_from = args.iter().position(|a| a == "--updated-from").and_then(|i| args.get(i + 1).cloned());
         SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
 
         let hinst = GetModuleHandleW(null());
@@ -152,15 +174,23 @@ pub fn run() {
             drawn: Default::default(),
             tips: Default::default(),
             widget: Widget::empty(), // 첫 로그 읽기가 끝난 뒤 refresh_widget에서 만든다
+            old_exe: None,
         };
         app.poll();
         app.sync(true);
         app.notify_low();
         app.refresh_widget(false);
+        if let Some(prev) = updated_from {
+            app.old_exe = std::env::current_exe().ok().map(|e| old_exe_path(&e));
+            app.clean_old_exe();
+            app.notify(usize::MAX, "업데이트 완료", &format!("버전 {VERSION}로 업데이트했습니다 (이전 {prev})"), false);
+        }
         APP.with(|a| *a.borrow_mut() = Some(app));
 
         let poll_secs = with_app(|a| a.config.poll_secs).unwrap_or(5);
         SetTimer(hwnd, TIMER_ID, poll_secs * 1000, None);
+        SetTimer(hwnd, TIMER_UPDATE_FIRST, UPDATE_FIRST_MS, None);
+        SetTimer(hwnd, TIMER_UPDATE, UPDATE_EVERY_MS, None);
 
         let mut msg: MSG = zeroed();
         while GetMessageW(&mut msg, null_mut(), 0, 0) > 0 {
@@ -184,6 +214,21 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
         match msg {
             WM_TIMER if wp == TIMER_ID => {
                 with_app(|a| a.refresh());
+                0
+            }
+            WM_TIMER if wp == TIMER_UPDATE_FIRST || wp == TIMER_UPDATE => {
+                if wp == TIMER_UPDATE_FIRST {
+                    KillTimer(hwnd, TIMER_UPDATE_FIRST);
+                }
+                start_update_check(hwnd, false);
+                0
+            }
+            WM_UPDATE_DONE => {
+                let result = UPDATE_RESULT.lock().ok().and_then(|mut r| r.take());
+                UPDATE_BUSY.store(false, Ordering::Relaxed);
+                if let Some((outcome, manual)) = result {
+                    with_app(|a| a.handle_update(outcome, manual));
+                }
                 0
             }
             WM_TRAY => {
@@ -259,6 +304,7 @@ unsafe fn show_menu(hwnd: HWND) {
         let check = if widget_visible { MF_CHECKED } else { 0 };
         AppendMenuW(menu, MF_STRING | check, IDM_WIDGET, wide("바탕화면 위젯").as_ptr());
         AppendMenuW(menu, MF_STRING, IDM_SETTINGS, wide("설정...").as_ptr());
+        AppendMenuW(menu, MF_STRING, IDM_UPDATE, wide(&format!("업데이트 확인 (현재 {VERSION})")).as_ptr());
         AppendMenuW(menu, MF_SEPARATOR, 0, null());
         AppendMenuW(menu, MF_STRING, IDM_EXIT, wide("종료").as_ptr());
         let mut pt: POINT = zeroed();
@@ -278,8 +324,45 @@ unsafe fn show_menu(hwnd: HWND) {
                 with_app(|a| a.set_widget_visible(!widget_visible));
             }
             IDM_SETTINGS => open_settings(),
+            IDM_UPDATE => start_update_check(hwnd, true),
             _ => {}
         }
+    }
+}
+
+/// 업데이트 확인을 별도 스레드에서 시작 (통신 중에도 화면이 멈추지 않게)
+fn start_update_check(hwnd: HWND, manual: bool) {
+    if !manual && !with_app(|a| a.config.auto_update).unwrap_or(false) {
+        return;
+    }
+    if UPDATE_BUSY.swap(true, Ordering::Relaxed) {
+        return; // 이미 확인 중
+    }
+    let hwnd = hwnd as usize;
+    let spawned = std::thread::Builder::new().stack_size(256 * 1024).spawn(move || {
+        let outcome = crate::updater::check(VERSION);
+        if let Ok(mut r) = UPDATE_RESULT.lock() {
+            *r = Some((outcome, manual));
+        }
+        unsafe { PostMessageW(hwnd as HWND, WM_UPDATE_DONE, 0, 0) };
+    });
+    if spawned.is_err() {
+        UPDATE_BUSY.store(false, Ordering::Relaxed);
+    }
+}
+
+/// 실행 중인 exe 옆의 이전 버전 파일 이름
+fn old_exe_path(exe: &Path) -> PathBuf {
+    let mut name = exe.file_name().unwrap_or_default().to_os_string();
+    name.push(".old");
+    exe.with_file_name(name)
+}
+
+/// 마지막 업데이트 확인 결과 한 줄 (%LOCALAPPDATA%\RazerBatteryTray\update.log)
+fn write_update_log(text: &str) {
+    if let Some(dir) = crate::updater::update_dir().and_then(|d| d.parent().map(Path::to_path_buf)) {
+        let _ = std::fs::create_dir_all(&dir);
+        let _ = std::fs::write(dir.join("update.log"), format!("{} {}\n", now(), text));
     }
 }
 
@@ -306,6 +389,7 @@ impl App {
     }
 
     fn refresh(&mut self) {
+        self.clean_old_exe();
         self.poll();
         self.sync(false);
         self.notify_low();
@@ -456,17 +540,87 @@ impl App {
         }
     }
 
-    /// 풍선 알림. 그 장치 아이콘을 작업표시줄에서 숨겼으면 보이는 다른 아이콘에 띄운다.
+    /// 잔량 부족 풍선 알림
     fn balloon(&self, i: usize, text: &str) {
-        let Some(anchor) = (if self.registered[i] { Some(i) } else { self.registered.iter().position(|&r| r) }) else {
+        self.notify(i, "배터리 부족", text, true);
+    }
+
+    /// 풍선 알림. i번 아이콘이 없으면(숨김, 또는 usize::MAX) 보이는 다른 아이콘에 띄운다.
+    pub(crate) fn notify(&self, i: usize, title: &str, text: &str, warning: bool) {
+        let own = self.registered.get(i).copied().unwrap_or(false);
+        let Some(anchor) = (if own { Some(i) } else { self.registered.iter().position(|&r| r) }) else {
             return; // 작업표시줄 아이콘이 하나도 없으면 알림을 띄울 곳이 없음
         };
         let mut nid = self.nid(anchor);
         nid.uFlags = NIF_INFO;
-        nid.dwInfoFlags = NIIF_WARNING;
-        copy_wide(&mut nid.szInfoTitle, "배터리 부족");
+        nid.dwInfoFlags = if warning { NIIF_WARNING } else { NIIF_INFO };
+        copy_wide(&mut nid.szInfoTitle, title);
         copy_wide(&mut nid.szInfo, text);
         unsafe { Shell_NotifyIconW(NIM_MODIFY, &nid) };
+    }
+
+    /// 업데이트 직후 이전 exe 지우기 (이전 프로세스가 아직 안 끝났으면 다음에 다시)
+    fn clean_old_exe(&mut self) {
+        if let Some(p) = &self.old_exe
+            && (!p.exists() || std::fs::remove_file(p).is_ok())
+        {
+            self.old_exe = None;
+            if let Some(dir) = crate::updater::update_dir() {
+                let _ = std::fs::remove_file(dir.join("razer_battery_tray.new.exe"));
+            }
+        }
+    }
+
+    fn handle_update(&mut self, outcome: crate::updater::Outcome, manual: bool) {
+        use crate::updater::Outcome;
+        match outcome {
+            Outcome::UpToDate => {
+                write_update_log(&format!("최신 버전 ({VERSION})"));
+                if manual {
+                    self.notify(usize::MAX, "업데이트 확인", &format!("최신 버전입니다 ({VERSION})"), false);
+                }
+            }
+            Outcome::Failed(e) => {
+                write_update_log(&format!("실패: {e}"));
+                if manual {
+                    self.notify(usize::MAX, "업데이트 확인 실패", &e, true);
+                }
+            }
+            Outcome::Ready { version, path } => match self.apply_update(&path) {
+                Ok(()) => write_update_log(&format!("{VERSION} → {version} 교체, 다시 시작")),
+                Err(e) => {
+                    write_update_log(&format!("교체 실패: {e}"));
+                    self.notify(usize::MAX, "업데이트 실패", &e, true);
+                }
+            },
+        }
+    }
+
+    /// 검증된 새 exe로 교체하고 다시 시작한다.
+    /// 실행 중인 exe는 지울 수 없지만 이름은 바꿀 수 있으므로: 현재 → .old, 새 파일 → 원래 이름.
+    fn apply_update(&mut self, new_exe: &Path) -> Result<(), String> {
+        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+        let old = old_exe_path(&exe);
+        let _ = std::fs::remove_file(&old);
+        std::fs::rename(&exe, &old).map_err(|e| format!("현재 파일 이름 바꾸기 실패: {e}"))?;
+        if let Err(e) = std::fs::copy(new_exe, &exe) {
+            let _ = std::fs::rename(&old, &exe); // 되돌리기
+            return Err(format!("새 파일 복사 실패: {e}"));
+        }
+        // 새 프로세스가 중복 실행 검사에 걸리지 않게 뮤텍스를 먼저 놓는다
+        let mutex = MUTEX.swap(null_mut(), Ordering::Relaxed);
+        if !mutex.is_null() {
+            unsafe { CloseHandle(mutex) };
+        }
+        if let Err(e) = std::process::Command::new(&exe).arg("--updated-from").arg(VERSION).spawn() {
+            // 새 버전을 못 띄우면 이전 버전으로 되돌리고 계속 실행
+            let _ = std::fs::remove_file(&exe);
+            let _ = std::fs::rename(&old, &exe);
+            return Err(format!("새 버전 실행 실패: {e}"));
+        }
+        // 지금 프로세스는 정리하고 끝냄 (with_app 안이므로 메시지로 미룸)
+        unsafe { PostMessageW(self.hwnd, WM_CLOSE, 0, 0) };
+        Ok(())
     }
 
     fn remove_all(&mut self) {

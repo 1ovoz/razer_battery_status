@@ -50,6 +50,7 @@ const C_TEXT: COLORREF = rgb(236, 236, 240);
 const C_SUBTEXT: COLORREF = rgb(150, 150, 155);
 
 const ID_AUTOSTART: i32 = 100;
+const ID_AUTOUPDATE: i32 = 101;
 const ID_WIDGET: i32 = 200; // +i
 const ID_TRAY: i32 = 210; // +i
 const ID_NICK: i32 = 220; // +i
@@ -258,7 +259,10 @@ unsafe fn build_controls(hwnd: HWND, dpi: u32) {
         });
         let h = control(hwnd, "BUTTON", "", cb, s(28), s(22), s(20), s(28), ID_AUTOSTART);
         check(h, autostart_enabled());
-        label("Windows 시작 시 자동 실행", 54, 22, 300, -1);
+        label("Windows 시작 시 자동 실행", 54, 22, 230, -1);
+        let h = control(hwnd, "BUTTON", "", cb, s(310), s(22), s(20), s(28), ID_AUTOUPDATE);
+        check(h, cfg.auto_update);
+        label("자동 업데이트 (하루 한 번 확인)", 336, 22, 240, -1);
 
         // 카드 2: 장치 (순서 ▲▼, 이름, 위젯, 작업표시줄, 표시 이름)
         label("순서", 28, 80, 50, ID_HEADER);
@@ -373,6 +377,7 @@ unsafe fn save(hwnd: HWND) {
         let p = SendMessageW(item(hwnd, ID_POLL), CB_GETCURSEL, 0, 0);
         cfg.poll_secs = POLL_CHOICES.get(p as usize).copied().unwrap_or(POLL_DEFAULT);
 
+        cfg.auto_update = checked(hwnd, ID_AUTOUPDATE);
         let want = checked(hwnd, ID_AUTOSTART);
         if want != autostart_enabled() {
             set_autostart(want);

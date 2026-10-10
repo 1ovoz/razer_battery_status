@@ -83,6 +83,8 @@ pub struct Config {
     pub widget_visible: bool,
     /// 로그·컨트롤러 확인 주기 (초)
     pub poll_secs: u32,
+    /// 하루 한 번 새 버전을 확인해 자동으로 업데이트
+    pub auto_update: bool,
     /// 위젯 화면 좌표 (없으면 기본 위치)
     pub pos: Option<(i32, i32)>,
 }
@@ -108,6 +110,7 @@ impl Default for Config {
             scale: 100,
             widget_visible: true,
             poll_secs: POLL_DEFAULT,
+            auto_update: true,
             pos: None,
         }
     }
@@ -152,6 +155,7 @@ impl Config {
                 }
                 "scale" => c.scale = v.parse::<u32>().map_or(100, |s| s.clamp(SCALE_MIN as u32, SCALE_MAX as u32) as u16),
                 "widget_visible" => c.widget_visible = v != "0",
+                "auto_update" => c.auto_update = v != "0",
                 "poll_secs" => c.poll_secs = v.parse::<u32>().map_or(POLL_DEFAULT, |p| p.clamp(1, 3600)),
                 "pos" => {
                     c.pos = v.split_once(',').and_then(|(x, y)| Some((x.trim().parse().ok()?, y.trim().parse().ok()?)))
@@ -171,7 +175,7 @@ impl Config {
 
     pub fn serialize(&self) -> String {
         let mut s = format!(
-            "order={}\nshow_widget={}\nshow_tray={}\nlow_threshold={}\nremind={}\nbg_opacity={}\nlayout={}\nscale={}\nwidget_visible={}\npoll_secs={}\n",
+            "order={}\nshow_widget={}\nshow_tray={}\nlow_threshold={}\nremind={}\nbg_opacity={}\nlayout={}\nscale={}\nwidget_visible={}\npoll_secs={}\nauto_update={}\n",
             self.order.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(","),
             bools(&self.show_widget),
             bools(&self.show_tray),
@@ -186,6 +190,7 @@ impl Config {
             self.scale,
             self.widget_visible as u8,
             self.poll_secs,
+            self.auto_update as u8,
         );
         if let Some((x, y)) = self.pos {
             s += &format!("pos={x},{y}\n");
@@ -273,6 +278,7 @@ mod tests {
         c.scale = 150;
         c.widget_visible = false;
         c.poll_secs = 15;
+        c.auto_update = false;
         c.pos = Some((-1200, 300));
         assert_eq!(Config::parse(&c.serialize()), c);
         assert_eq!(c.display_name(2, "Viper"), "내 마우스 = 메인");
