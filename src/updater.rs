@@ -1,10 +1,11 @@
 //! 자동 업데이트: GitHub의 dist/latest.txt를 확인하고, 서명이 맞는 새 exe만 받아 둔다.
 //!
-//! - 통신은 WinHTTP, 해시·서명 검증은 BCrypt(Windows 기본 암호화). 둘 다 확인할 때만
-//!   System32에서 불러오고 끝나면 내려놓는다(평소 메모리 사용 없음).
+//! - 통신은 WinHTTP, 해시·서명 검증은 BCrypt(Windows 기본 암호화). WinHTTP는 한 번 불러오면
+//!   프로세스에서 내려가지 않으므로, 확인은 같은 exe를 `--update-check`로 띄운 짧은 프로세스에서
+//!   하고 결과만 파일로 넘긴다(메인 앱의 메모리는 그대로).
 //! - 서명 검증: tools/release.sh가 개발 PC의 비밀 키로 "버전\nSHA256\n"에 서명한다.
 //!   앱에는 공개 키만 들어 있어서, GitHub 저장소가 털려도 그 키 없이는 가짜 exe를 배포할 수 없다.
-//! - 이 함수는 블로킹이라 별도 스레드에서 부른다. 실제 교체·재시작은 메인 스레드(tray.rs)가 한다.
+//! - 실제 교체·재시작은 메인 앱(tray.rs)이 한다.
 
 use std::ffi::c_void;
 use std::path::PathBuf;
@@ -249,11 +250,61 @@ pub fn update_dir() -> Option<PathBuf> {
     Some(PathBuf::from(std::env::var_os("LOCALAPPDATA")?).join("RazerBatteryTray").join("update"))
 }
 
-/// 새 버전이 있는지 확인하고, 있으면 받아서 검증한 뒤 저장해 둔다 (블로킹)
-pub fn check(current: &str) -> Outcome {
-    match check_inner(current) {
-        Ok(o) => o,
-        Err(e) => Outcome::Failed(e),
+fn result_path() -> Option<PathBuf> {
+    Some(update_dir()?.join("check_result.txt"))
+}
+
+/// 확인 전용 프로세스(`--update-check`)의 본체: 확인하고 결과를 파일에 쓴 뒤 끝난다
+pub fn run_check_process(current: &str) {
+    let text = match check_inner(current) {
+        Ok(Outcome::UpToDate) => "UPTODATE".to_string(),
+        Ok(Outcome::Ready { version, .. }) => format!("READY\n{version}"),
+        Ok(Outcome::Failed(e)) | Err(e) => format!("FAILED\n{e}"),
+    };
+    if let Some(p) = result_path() {
+        if let Some(dir) = p.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let _ = std::fs::write(p, text);
+    }
+}
+
+/// 메인 앱에서: 확인 프로세스를 띄워 끝날 때까지(최대 2분) 기다리고 결과를 읽는다 (블로킹 → 스레드에서 호출)
+pub fn check_in_child() -> Outcome {
+    let (Ok(exe), Some(result)) = (std::env::current_exe(), result_path()) else {
+        return Outcome::Failed("실행 파일 위치를 알 수 없음".into());
+    };
+    let _ = std::fs::remove_file(&result);
+    let mut child = match std::process::Command::new(&exe).arg("--update-check").spawn() {
+        Ok(c) => c,
+        Err(e) => return Outcome::Failed(format!("확인 프로세스 실행 실패: {e}")),
+    };
+    let mut waited = 0;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if waited < 240 => {
+                std::thread::sleep(std::time::Duration::from_millis(500));
+                waited += 1;
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Outcome::Failed("확인 시간 초과".into());
+            }
+        }
+    }
+    let text = std::fs::read_to_string(&result).unwrap_or_default();
+    let _ = std::fs::remove_file(&result);
+    let mut lines = text.lines();
+    match (lines.next(), lines.next()) {
+        (Some("UPTODATE"), _) => Outcome::UpToDate,
+        (Some("READY"), Some(v)) => match update_dir() {
+            Some(dir) => Outcome::Ready { version: v.to_string(), path: dir.join("razer_battery_tray.new.exe") },
+            None => Outcome::Failed("LOCALAPPDATA 없음".into()),
+        },
+        (Some("FAILED"), msg) => Outcome::Failed(msg.unwrap_or("알 수 없는 오류").to_string()),
+        _ => Outcome::Failed("확인 결과를 읽지 못함".into()),
     }
 }
 

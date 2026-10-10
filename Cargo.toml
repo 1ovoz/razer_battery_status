@@ -1,6 +1,6 @@
 [package]
 name = "razer_battery_tray"
-version = "1.1.0"
+version = "1.1.1"
 edition = "2024"
 
 [dependencies]

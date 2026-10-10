@@ -125,6 +125,11 @@ fn copy_wide(dst: &mut [u16], s: &str) {
 }
 
 pub fn run() {
+    // 업데이트 확인 전용 프로세스로 실행된 경우: 확인만 하고 끝 (창·트레이·중복 실행 검사 없음)
+    if std::env::args().any(|a| a == "--update-check") {
+        crate::updater::run_check_process(VERSION);
+        return;
+    }
     unsafe {
         // 중복 실행 방지
         let name = wide("Local\\RazerBatteryTray.SingleInstance");
@@ -330,7 +335,7 @@ unsafe fn show_menu(hwnd: HWND) {
     }
 }
 
-/// 업데이트 확인을 별도 스레드에서 시작 (통신 중에도 화면이 멈추지 않게)
+/// 업데이트 확인 시작. 확인은 짧은 별도 프로세스가 하고, 이 스레드는 그 프로세스가 끝나길 기다리기만 한다
 fn start_update_check(hwnd: HWND, manual: bool) {
     if !manual && !with_app(|a| a.config.auto_update).unwrap_or(false) {
         return;
@@ -339,8 +344,8 @@ fn start_update_check(hwnd: HWND, manual: bool) {
         return; // 이미 확인 중
     }
     let hwnd = hwnd as usize;
-    let spawned = std::thread::Builder::new().stack_size(256 * 1024).spawn(move || {
-        let outcome = crate::updater::check(VERSION);
+    let spawned = std::thread::Builder::new().stack_size(64 * 1024).spawn(move || {
+        let outcome = crate::updater::check_in_child();
         if let Ok(mut r) = UPDATE_RESULT.lock() {
             *r = Some((outcome, manual));
         }
