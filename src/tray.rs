@@ -288,13 +288,21 @@ fn tray_icon_size() -> i32 {
 }
 
 impl App {
+    /// 위젯·작업표시줄 둘 다 끈 장치는 "추적 안 함": 확인도 알림도 하지 않는다
+    fn enabled(&self, i: usize) -> bool {
+        self.config.show_widget[i] || self.config.show_tray[i]
+    }
+
     fn poll(&mut self) {
         if let Some(w) = &mut self.watcher
             && let Ok(events) = w.poll()
         {
             self.state.apply_all(&events);
         }
-        self.pad.update(read_pad(), &now());
+        // 패드를 끄면 XInput을 아예 부르지 않는다 (xinput1_4.dll도 불러오지 않음)
+        if self.enabled(PAD) {
+            self.pad.update(read_pad(), &now());
+        }
     }
 
     fn refresh(&mut self) {
@@ -352,6 +360,7 @@ impl App {
         }
         self.config = cfg;
         self.save_config();
+        self.poll(); // 다시 켠 장치가 있으면 바로 상태를 읽는다
         self.tips = Default::default(); // 이름이 바뀌었을 수 있으니 툴팁 다시 반영
         self.sync(false);
         self.refresh_widget(false);
@@ -427,6 +436,9 @@ impl App {
         let now = unsafe { GetTickCount64() } / 1000;
         let (threshold, remind) = (self.config.low_threshold, self.config.remind);
         for i in 0..ICONS {
+            if !self.enabled(i) {
+                continue;
+            }
             let (low, detail) = if i == PAD {
                 let d = match self.pad.status {
                     PadStatus::Wireless(l) => format!("배터리 {}", l.label()),
