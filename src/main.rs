@@ -3,6 +3,8 @@
 #[cfg(windows)]
 mod tray;
 #[cfg(windows)]
+mod settings;
+#[cfg(windows)]
 mod widget;
 
 #[cfg(windows)]

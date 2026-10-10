@@ -2,6 +2,7 @@
 
 use std::cell::RefCell;
 use std::ffi::c_void;
+use std::path::PathBuf;
 use std::mem::{size_of, zeroed};
 use std::ptr::{null, null_mut};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -9,28 +10,37 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use windows_sys::Win32::Foundation::*;
 use windows_sys::Win32::Graphics::Gdi::*;
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows_sys::Win32::System::SystemInformation::GetLocalTime;
+use windows_sys::Win32::System::SystemInformation::{GetLocalTime, GetTickCount64};
 use windows_sys::Win32::System::Threading::CreateMutexW;
 use windows_sys::Win32::UI::HiDpi::*;
 use windows_sys::Win32::UI::Input::XboxController::*;
 use windows_sys::Win32::UI::Shell::*;
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
-use razer_battery_tray::gamepad::{PadLevel, PadState, PadStatus};
-use razer_battery_tray::parser::{DeviceState, State, Status, N};
+use razer_battery_tray::config::{Config, Reminder, DEVICES};
+use razer_battery_tray::gamepad::{PadLevel, PadState, PadStatus, PAD_NAME};
+use razer_battery_tray::parser::{DeviceState, State, Status, N, TRACKED};
 use razer_battery_tray::watcher::{default_log_dir, Watcher};
 
-use crate::widget::{device_tile, pad_tile, Widget};
+use crate::widget::{device_tile, pad_tile, Style, Widget, SHORT_NAMES};
 
 const WM_TRAY: u32 = WM_APP + 1;
 const TIMER_ID: usize = 1;
 const POLL_MS: u32 = 30_000;
 const IDM_EXIT: usize = 1;
 const IDM_WIDGET: usize = 2;
+const IDM_SETTINGS: usize = 3;
+/// 설정 창 열기 요청 (위젯 등에서 보냄 — 메시지로 미뤄서 다른 처리 중에 창을 만들지 않게)
+const WM_OPEN_SETTINGS: u32 = WM_APP + 2;
 
 /// Razer 기기 N개 + 게임패드 1개
-const ICONS: usize = N + 1;
+const ICONS: usize = DEVICES;
 const PAD: usize = N;
+
+/// 트레이 툴팁·알림용 기본 이름
+fn full_name(i: usize) -> &'static str {
+    if i == PAD { PAD_NAME } else { TRACKED[i].1 }
+}
 
 static TASKBAR_CREATED: AtomicU32 = AtomicU32::new(0);
 
@@ -60,6 +70,11 @@ struct Visual {
 
 pub(crate) struct App {
     hwnd: HWND,
+    pub config: Config,
+    config_path: Option<PathBuf>,
+    reminders: [Reminder; ICONS],
+    /// 지금 작업표시줄에 등록돼 있는 아이콘
+    registered: [bool; ICONS],
     watcher: Option<Watcher>,
     state: State,
     pad: PadState,
@@ -117,8 +132,14 @@ pub fn run() {
         }
         TASKBAR_CREATED.store(RegisterWindowMessageW(wide("TaskbarCreated").as_ptr()), Ordering::Relaxed);
 
+        let config_path = Config::default_path();
+        let config = config_path.as_deref().map(Config::load).unwrap_or_default();
         let mut app = App {
             hwnd,
+            config,
+            config_path,
+            reminders: Default::default(),
+            registered: [false; ICONS],
             watcher: default_log_dir().map(Watcher::new),
             state: State::default(),
             icon_size: tray_icon_size(),
@@ -138,6 +159,12 @@ pub fn run() {
 
         let mut msg: MSG = zeroed();
         while GetMessageW(&mut msg, null_mut(), 0, 0) > 0 {
+            // 설정 창: Tab 이동, Enter = 저장, Esc = 취소
+            let settings = crate::settings::hwnd();
+            if !settings.is_null() && IsDialogMessageW(settings, &msg) != 0 {
+                continue;
+            }
+            TranslateMessage(&msg); // 닉네임 입력(한글 IME 포함)에 필요
             DispatchMessageW(&msg);
         }
     }
@@ -165,8 +192,21 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 }
                 0
             }
+            WM_OPEN_SETTINGS => {
+                if let Some((cfg, names)) = with_app(|a| {
+                    let names: [String; DEVICES] = std::array::from_fn(|i| full_name(i).to_string());
+                    (a.config.clone(), names)
+                }) {
+                    crate::settings::open(cfg, names);
+                }
+                0
+            }
             WM_DESTROY => {
                 KillTimer(hwnd, TIMER_ID);
+                let settings = crate::settings::hwnd();
+                if !settings.is_null() {
+                    DestroyWindow(settings);
+                }
                 with_app(|a| {
                     a.remove_all();
                     DestroyWindow(a.widget.hwnd);
@@ -182,6 +222,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                         a.icon_size = size;
                         a.drawn = Default::default();
                     }
+                    a.registered = [false; ICONS];
                     a.sync(true);
                     a.refresh_widget(true);
                 });
@@ -199,12 +240,20 @@ pub(crate) fn quit() {
     }
 }
 
+/// 설정 창 열기 (메인 창에 요청을 보내 다음 메시지 처리 때 연다)
+pub(crate) fn open_settings() {
+    if let Some(hwnd) = with_app(|a| a.hwnd) {
+        unsafe { PostMessageW(hwnd, WM_OPEN_SETTINGS, 0, 0) };
+    }
+}
+
 unsafe fn show_menu(hwnd: HWND) {
     unsafe {
-        let widget_visible = with_app(|a| a.widget.visible).unwrap_or(false);
+        let widget_visible = with_app(|a| a.config.widget_visible).unwrap_or(false);
         let menu = CreatePopupMenu();
         let check = if widget_visible { MF_CHECKED } else { 0 };
         AppendMenuW(menu, MF_STRING | check, IDM_WIDGET, wide("바탕화면 위젯").as_ptr());
+        AppendMenuW(menu, MF_STRING, IDM_SETTINGS, wide("설정...").as_ptr());
         AppendMenuW(menu, MF_SEPARATOR, 0, null());
         AppendMenuW(menu, MF_STRING, IDM_EXIT, wide("종료").as_ptr());
         let mut pt: POINT = zeroed();
@@ -221,11 +270,9 @@ unsafe fn show_menu(hwnd: HWND) {
                 DestroyWindow(hwnd);
             }
             IDM_WIDGET => {
-                with_app(|a| {
-                    a.widget.set_visible(!widget_visible);
-                    a.refresh_widget(false);
-                });
+                with_app(|a| a.set_widget_visible(!widget_visible));
             }
+            IDM_SETTINGS => open_settings(),
             _ => {}
         }
     }
@@ -255,13 +302,55 @@ impl App {
     /// 위젯 내용 갱신 (바뀐 게 없으면 아무것도 안 함). force면 다시 그림.
     pub(crate) fn refresh_widget(&mut self, force: bool) {
         if !self.widget.is_alive() {
-            self.widget = Widget::create();
+            self.widget = Widget::create(self.config.widget_visible, self.config.pos);
         } else if force {
             self.widget.invalidate();
         }
-        let mut tiles: Vec<_> = self.state.devices.iter().map(device_tile).collect();
-        tiles.push(pad_tile(&self.pad));
-        self.widget.update(tiles);
+        let c = &self.config;
+        let tiles: Vec<_> = (0..DEVICES)
+            .filter(|&i| c.show_widget[i])
+            .map(|i| {
+                let name = c.display_name(i, SHORT_NAMES[i]);
+                if i == PAD { pad_tile(&self.pad, name) } else { device_tile(&self.state.devices[i], name) }
+            })
+            .collect();
+        let style = Style { bg_opacity: c.bg_opacity, layout: c.layout, scale: c.scale };
+        // 보여줄 장치가 하나도 없으면 위젯을 숨긴다
+        let show = c.widget_visible && !tiles.is_empty();
+        if show != self.widget.visible {
+            self.widget.set_visible(show);
+        }
+        if let Some(p) = self.widget.update(tiles, style) {
+            self.config.pos = Some(p);
+            self.save_config();
+        }
+    }
+
+    pub(crate) fn save_config(&self) {
+        if let Some(p) = &self.config_path {
+            self.config.save(p);
+        }
+    }
+
+    /// 설정 일부를 바꾸고 저장·반영
+    pub(crate) fn change_config(&mut self, f: impl FnOnce(&mut Config)) {
+        f(&mut self.config);
+        self.save_config();
+        self.refresh_widget(false);
+    }
+
+    /// 설정 창에서 저장한 설정 반영
+    pub(crate) fn apply_config(&mut self, cfg: Config) {
+        self.config = cfg;
+        self.save_config();
+        self.tips = Default::default(); // 이름이 바뀌었을 수 있으니 툴팁 다시 반영
+        self.sync(false);
+        self.refresh_widget(false);
+        self.notify_low();
+    }
+
+    pub(crate) fn set_widget_visible(&mut self, visible: bool) {
+        self.change_config(|c| c.widget_visible = visible);
     }
 
     fn nid(&self, i: usize) -> NOTIFYICONDATAW {
@@ -273,13 +362,24 @@ impl App {
     }
 
     /// 상태가 바뀐 아이콘만 다시 그려 반영한다. add=true면 모두 새로 등록한다.
+    /// 설정에서 작업표시줄 표시를 끈 장치는 등록을 지운다.
     fn sync(&mut self, add: bool) {
         for i in 0..ICONS {
+            if !self.config.show_tray[i] {
+                if self.registered[i] {
+                    let nid = self.nid(i);
+                    unsafe { Shell_NotifyIconW(NIM_DELETE, &nid) };
+                    self.registered[i] = false;
+                }
+                continue;
+            }
+            let add = add || !self.registered[i];
+            let name = self.config.display_name(i, full_name(i));
             let (visual, tip) = if i == PAD {
-                (pad_visual(&self.pad), self.pad.tooltip())
+                (pad_visual(&self.pad), self.pad.tooltip(name))
             } else {
                 let d = &self.state.devices[i];
-                (device_visual(d), d.tooltip())
+                (device_visual(d), d.tooltip(name))
             };
             let redraw = self.drawn[i].as_ref() != Some(&visual);
             if !add && !redraw && tip == self.tips[i] {
@@ -301,6 +401,7 @@ impl App {
                     Shell_NotifyIconW(NIM_ADD, &nid);
                     nid.Anonymous.uVersion = NOTIFYICON_VERSION_4;
                     Shell_NotifyIconW(NIM_SETVERSION, &nid);
+                    self.registered[i] = true;
                 } else {
                     Shell_NotifyIconW(NIM_MODIFY, &nid);
                 }
@@ -312,20 +413,34 @@ impl App {
         }
     }
 
+    /// 잔량 부족 알림: 설정의 기준 %와 간격(1분~30분 / 1번만 / 안 함)을 따른다
     fn notify_low(&mut self) {
-        for i in 0..N {
-            if self.state.devices[i].take_low_battery_alert() {
+        let now = unsafe { GetTickCount64() } / 1000;
+        let (threshold, remind) = (self.config.low_threshold, self.config.remind);
+        for i in 0..ICONS {
+            let (low, detail) = if i == PAD {
+                let d = match self.pad.status {
+                    PadStatus::Wireless(l) => format!("배터리 {}", l.label()),
+                    _ => String::new(),
+                };
+                (self.pad.low(threshold), d)
+            } else {
                 let d = &self.state.devices[i];
-                self.balloon(i, &format!("{} 잔량 {}%", d.name, d.level.unwrap_or(0)));
+                (d.low(threshold), format!("잔량 {}%", d.level.unwrap_or(0)))
+            };
+            if self.reminders[i].check(low, now, remind) {
+                let name = self.config.display_name(i, full_name(i)).to_string();
+                self.balloon(i, &format!("{name} {detail}"));
             }
-        }
-        if self.pad.take_low_battery_alert() {
-            self.balloon(PAD, &format!("{} 배터리 거의 없음", razer_battery_tray::gamepad::PAD_NAME));
         }
     }
 
+    /// 풍선 알림. 그 장치 아이콘을 작업표시줄에서 숨겼으면 보이는 다른 아이콘에 띄운다.
     fn balloon(&self, i: usize, text: &str) {
-        let mut nid = self.nid(i);
+        let Some(anchor) = (if self.registered[i] { Some(i) } else { self.registered.iter().position(|&r| r) }) else {
+            return; // 작업표시줄 아이콘이 하나도 없으면 알림을 띄울 곳이 없음
+        };
+        let mut nid = self.nid(anchor);
         nid.uFlags = NIF_INFO;
         nid.dwInfoFlags = NIIF_WARNING;
         copy_wide(&mut nid.szInfoTitle, "배터리 부족");
@@ -336,6 +451,7 @@ impl App {
     fn remove_all(&mut self) {
         for i in 0..ICONS {
             let nid = self.nid(i);
+            self.registered[i] = false;
             unsafe {
                 Shell_NotifyIconW(NIM_DELETE, &nid);
                 if !self.icons[i].is_null() {

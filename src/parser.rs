@@ -11,9 +11,6 @@ pub const TRACKED: [(u32, &str); 3] = [
 ];
 pub const N: usize = TRACKED.len();
 
-/// 이 값 미만으로 떨어지면 풍선 알림을 띄운다.
-pub const LOW_BATTERY: u8 = 15;
-
 /// "2026/10/10 17:38:33.237" — 사전순 비교 = 시간순 비교
 pub type Ts = [u8; 23];
 
@@ -165,45 +162,28 @@ pub struct DeviceState {
     pub level: Option<u8>,
     /// level을 관찰한 시각
     pub level_ts: Option<Ts>,
-    low_notified: bool,
 }
 
 impl DeviceState {
-    /// 잔량이 LOW_BATTERY 미만으로 떨어졌을 때 한 번만 true를 돌려준다.
-    /// 충전을 시작하거나 잔량이 회복되면 다시 알릴 수 있게 된다.
-    pub fn take_low_battery_alert(&mut self) -> bool {
+    /// 잔량 부족 여부. Some(true)=threshold% 미만으로 사용 중, Some(false)=정상·충전 중, None=꺼짐·모름
+    pub fn low(&self, threshold: u8) -> Option<bool> {
         match (self.status, self.level) {
-            (Status::Discharging, Some(l)) if l < LOW_BATTERY => {
-                let fire = !self.low_notified;
-                self.low_notified = true;
-                fire
-            }
-            (Status::Charging, _) => {
-                self.low_notified = false;
-                false
-            }
-            (Status::Discharging, Some(_)) => {
-                self.low_notified = false;
-                false
-            }
-            _ => false,
+            (Status::Discharging, Some(l)) => Some(l < threshold),
+            (Status::Charging, _) => Some(false),
+            _ => None,
         }
     }
 
-    /// 트레이 툴팁 문자열
-    pub fn tooltip(&self) -> String {
+    /// 트레이 툴팁 문자열 (name = 표시 이름)
+    pub fn tooltip(&self, name: &str) -> String {
         let when = |ts: &Option<Ts>| ts.map(|t| fmt_ts(&t)).unwrap_or_default();
         match (self.status, self.level) {
-            (Status::Unknown, _) => format!("{}\n기록 없음", self.name),
-            (Status::Off, Some(l)) => {
-                format!("{}\n꺼짐 (마지막 {}%, {})", self.name, l, when(&self.level_ts))
-            }
-            (Status::Off, None) => format!("{}\n꺼짐", self.name),
-            (Status::Charging, Some(l)) => {
-                format!("{}\n{}% 충전 중\n갱신 {}", self.name, l, when(&self.level_ts))
-            }
-            (_, Some(l)) => format!("{}\n{}%\n갱신 {}", self.name, l, when(&self.level_ts)),
-            (_, None) => format!("{}\n잔량 정보 없음", self.name),
+            (Status::Unknown, _) => format!("{name}\n기록 없음"),
+            (Status::Off, Some(l)) => format!("{name}\n꺼짐 (마지막 {l}%, {})", when(&self.level_ts)),
+            (Status::Off, None) => format!("{name}\n꺼짐"),
+            (Status::Charging, Some(l)) => format!("{name}\n{l}% 충전 중\n갱신 {}", when(&self.level_ts)),
+            (_, Some(l)) => format!("{name}\n{l}%\n갱신 {}", when(&self.level_ts)),
+            (_, None) => format!("{name}\n잔량 정보 없음"),
         }
     }
 }
@@ -232,7 +212,6 @@ impl Default for State {
                 status: Status::Unknown,
                 level: None,
                 level_ts: None,
-                low_notified: false,
             }),
             last_ts: None,
         }
@@ -342,7 +321,8 @@ mod tests {
         let d = &s.devices[2];
         assert_eq!(d.status, Status::Off);
         assert_eq!(d.level, Some(79));
-        assert_eq!(d.tooltip(), "Razer Viper Ultimate\n꺼짐 (마지막 79%, 10/09 23:51)");
+        assert_eq!(d.tooltip(d.name), "Razer Viper Ultimate\n꺼짐 (마지막 79%, 10/09 23:51)");
+        assert_eq!(d.tooltip("내 마우스"), "내 마우스\n꺼짐 (마지막 79%, 10/09 23:51)");
     }
 
     #[test]
@@ -377,18 +357,15 @@ mod tests {
     }
 
     #[test]
-    fn low_battery_alert_once() {
+    fn low_uses_threshold() {
         let mut s = State::default();
-        let d = |s: &mut State| s.devices[2].take_low_battery_alert();
+        assert_eq!(s.devices[2].low(15), None);
         s.apply(&snap("2026/10/09 10:00:00.000", &[dev(122, "NoCharge_BatteryFull", 15)]));
-        assert!(!d(&mut s));
-        s.apply(&snap("2026/10/09 10:10:00.000", &[dev(122, "NoCharge_BatteryFull", 14)]));
-        assert!(d(&mut s));
-        s.apply(&snap("2026/10/09 10:20:00.000", &[dev(122, "NoCharge_BatteryFull", 13)]));
-        assert!(!d(&mut s));
-        s.apply(&snap("2026/10/09 10:30:00.000", &[dev(122, "Charging", 13)]));
-        assert!(!d(&mut s));
-        s.apply(&snap("2026/10/09 10:40:00.000", &[dev(122, "NoCharge_BatteryFull", 12)]));
-        assert!(d(&mut s));
+        assert_eq!(s.devices[2].low(15), Some(false));
+        assert_eq!(s.devices[2].low(20), Some(true));
+        s.apply(&snap("2026/10/09 10:10:00.000", &[dev(122, "Charging", 5)]));
+        assert_eq!(s.devices[2].low(15), Some(false));
+        s.apply(&snap("2026/10/09 10:20:00.000", &[dev(122, "off", 0)]));
+        assert_eq!(s.devices[2].low(15), None);
     }
 }

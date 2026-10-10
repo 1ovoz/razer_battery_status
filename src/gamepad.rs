@@ -36,6 +36,16 @@ impl PadLevel {
     pub fn bars(self) -> u8 {
         self as u8
     }
+
+    /// 잔량 부족 판정용 대략적인 %
+    pub fn approx_percent(self) -> u8 {
+        match self {
+            Self::Empty => 5,
+            Self::Low => 25,
+            Self::Medium => 60,
+            Self::Full => 100,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -68,12 +78,11 @@ pub struct PadState {
     pub changed_at: Option<String>,
     /// 꺼지기 전 마지막 무선 잔량과 그 시각
     pub last_wireless: Option<(PadLevel, String)>,
-    low_notified: bool,
 }
 
 impl Default for PadState {
     fn default() -> Self {
-        Self { status: PadStatus::Disconnected, changed_at: None, last_wireless: None, low_notified: false }
+        Self { status: PadStatus::Disconnected, changed_at: None, last_wireless: None }
     }
 }
 
@@ -91,34 +100,27 @@ impl PadState {
         true
     }
 
-    /// 무선 잔량이 EMPTY(빨간 LED 깜빡임 단계)가 되면 한 번만 true.
-    pub fn take_low_battery_alert(&mut self) -> bool {
+    /// 잔량 부족 여부 (parser::DeviceState::low와 같은 의미). 단계를 대략적인 %로 바꿔 비교한다.
+    pub fn low(&self, threshold: u8) -> Option<bool> {
         match self.status {
-            PadStatus::Wireless(PadLevel::Empty) => {
-                let fire = !self.low_notified;
-                self.low_notified = true;
-                fire
-            }
-            PadStatus::Wireless(_) | PadStatus::Wired => {
-                self.low_notified = false;
-                false
-            }
-            _ => false,
+            PadStatus::Wireless(l) => Some(l.approx_percent() < threshold),
+            PadStatus::Wired => Some(false),
+            _ => None,
         }
     }
 
-    pub fn tooltip(&self) -> String {
+    pub fn tooltip(&self, name: &str) -> String {
         let at = self.changed_at.as_deref().unwrap_or("");
         match self.status {
             PadStatus::Disconnected => match &self.last_wireless {
-                Some((l, t)) => format!("{PAD_NAME}\n꺼짐 (마지막 {}, {t})", l.label()),
-                None => format!("{PAD_NAME}\n연결 안 됨"),
+                Some((l, t)) => format!("{name}\n꺼짐 (마지막 {}, {t})", l.label()),
+                None => format!("{name}\n연결 안 됨"),
             },
-            PadStatus::Wired => format!("{PAD_NAME}\n유선 연결 (충전 중)\n갱신 {at}"),
+            PadStatus::Wired => format!("{name}\n유선 연결 (충전 중)\n갱신 {at}"),
             PadStatus::Wireless(l) => {
-                format!("{PAD_NAME}\n배터리 {} ({}/3칸)\n갱신 {at}", l.label(), l.bars())
+                format!("{name}\n배터리 {} ({}/3칸)\n갱신 {at}", l.label(), l.bars())
             }
-            PadStatus::Unknown => format!("{PAD_NAME}\n연결됨 (잔량 정보 없음)"),
+            PadStatus::Unknown => format!("{name}\n연결됨 (잔량 정보 없음)"),
         }
     }
 }
@@ -140,27 +142,23 @@ mod tests {
     #[test]
     fn off_keeps_last_wireless_level() {
         let mut p = PadState::default();
-        assert_eq!(p.tooltip(), "GameSir G7 Pro\n연결 안 됨");
+        assert_eq!(p.tooltip(PAD_NAME), "GameSir G7 Pro\n연결 안 됨");
         assert!(p.update(PadStatus::Wireless(PadLevel::Medium), "10/10 18:20"));
         assert!(!p.update(PadStatus::Wireless(PadLevel::Medium), "10/10 18:21"));
         assert!(p.update(PadStatus::Disconnected, "10/10 18:30"));
-        assert_eq!(p.tooltip(), "GameSir G7 Pro\n꺼짐 (마지막 보통, 10/10 18:21)");
+        assert_eq!(p.tooltip(PAD_NAME), "GameSir G7 Pro\n꺼짐 (마지막 보통, 10/10 18:21)");
     }
 
     #[test]
-    fn low_alert_once_per_drop() {
+    fn low_from_levels() {
         let mut p = PadState::default();
+        assert_eq!(p.low(15), None);
         p.update(PadStatus::Wireless(PadLevel::Low), "t");
-        assert!(!p.take_low_battery_alert());
+        assert_eq!(p.low(15), Some(false));
+        assert_eq!(p.low(30), Some(true));
         p.update(PadStatus::Wireless(PadLevel::Empty), "t");
-        assert!(p.take_low_battery_alert());
-        assert!(!p.take_low_battery_alert());
-        p.update(PadStatus::Disconnected, "t");
-        p.update(PadStatus::Wireless(PadLevel::Empty), "t");
-        assert!(!p.take_low_battery_alert(), "껐다 켜도 충전 전엔 다시 알리지 않음");
+        assert_eq!(p.low(15), Some(true));
         p.update(PadStatus::Wired, "t");
-        assert!(!p.take_low_battery_alert());
-        p.update(PadStatus::Wireless(PadLevel::Empty), "t");
-        assert!(p.take_low_battery_alert());
+        assert_eq!(p.low(15), Some(false));
     }
 }

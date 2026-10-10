@@ -63,7 +63,7 @@ fn real_logs_parse_cleanly() {
     let mut state = State::default();
     state.apply_all(&events);
     for d in &state.devices {
-        eprintln!("{:>5} {:?} {:?} -> {:?}", d.product_id, d.status, d.level, d.tooltip());
+        eprintln!("{:>5} {:?} {:?} -> {:?}", d.product_id, d.status, d.level, d.tooltip(d.name));
     }
     // 로그에 한 번이라도 잔량이 찍힌 기기는 Unknown이면 안 됨
     for (i, &(pid, _)) in TRACKED.iter().enumerate() {
