@@ -214,6 +214,6 @@ cargo test
 ## 알려진 한계
 
 - **Razer 기기는 Synapse 4가 실행 중이어야** 합니다. Synapse의 로그 형식이 바뀌면 고쳐야 할 수 있습니다.
-- **GameSir G7 Pro는 실제 기기로 테스트하지 못했습니다.** 컨트롤러가 XInput으로 배터리를 보고하지 않으면 "연결됨 (잔량 정보 없음)"으로만 보입니다. 여러 XInput 컨트롤러가 연결돼 있으면 Windows가 먼저 잡은 하나만 표시합니다.
+- **GameSir G7 Pro는 2.4GHz 동글로 연결해도 "유선"으로 나올 수 있습니다.** 동글이 Windows에 자기를 유선 컨트롤러로 알리면 XInput으로는 잔량을 알 수 없습니다. 컨트롤러가 연결된 PC에서 `powershell -ExecutionPolicy Bypass -File tools\gamepad_diag.ps1`를 실행하면 Windows가 컨트롤러를 어떻게 보는지와 다른 방식(Windows.Gaming.Input)으로 잔량을 읽을 수 있는지 확인할 수 있습니다. 여러 XInput 컨트롤러가 연결돼 있으면 Windows가 먼저 잡은 하나만 표시합니다.
 - 작업표시줄 아이콘을 전부 끄면 잔량 부족 알림을 띄울 곳이 없어 알림이 나오지 않습니다.
 - 위젯 아이콘은 Windows 11의 Segoe Fluent Icons 글꼴을 쓰고, Windows 10에서는 Segoe MDL2 Assets로 대신합니다.
