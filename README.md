@@ -91,7 +91,7 @@ GameSir G7 Pro ──▶ Windows XInput ──▶ 이 프로그램 ──▶ 트
 받은 파일이 맞는지 확인하려면 PowerShell에서 `Get-FileHash razer_battery_tray.exe`를 실행해 아래 값과 비교하세요.
 
 ```
-SHA256  9D58AAA8799E50D7F659BE15CF9017653FF67949E4A04A048AA3EDDC429274D5
+SHA256  940CD95153FDE93453A44670C1B3F17AAF4AFE8FC126E655BC5DC4D7E02475A2
 ```
 
 **제거**:
