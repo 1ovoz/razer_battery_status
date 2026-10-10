@@ -20,7 +20,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
 use razer_battery_tray::config::{Layout, SCALE_MAX, SCALE_MIN};
 use razer_battery_tray::gamepad::{PadLevel, PadState, PadStatus};
-use razer_battery_tray::parser::{DeviceState, Status};
+use razer_battery_tray::parser::{DeviceState, Kind, Status};
 
 use crate::tray::{dib, wide, with_app};
 
@@ -41,16 +41,36 @@ const BLUE: Rgb = (0x0A, 0x84, 0xFF);
 // Segoe Fluent Icons 글리프
 const G_MOUSE: char = '\u{E962}';
 const G_HEADSET: char = '\u{E7F6}';
+const G_KEYBOARD: char = '\u{E765}';
+const G_DEVICE: char = '\u{E772}';
 const G_GAMEPAD: char = '\u{E7FC}';
 const G_BOLT: char = '\u{E945}';
 const G_GEAR: char = '\u{E713}';
 
-const ICON_FONT: &str = "Segoe Fluent Icons";
+/// 아이콘 글꼴: Windows 11은 Segoe Fluent Icons, 없으면(Windows 10) 같은 글리프 코드를 쓰는 Segoe MDL2 Assets
+fn icon_font() -> &'static str {
+    static FONT: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
+    FONT.get_or_init(|| unsafe {
+        const FLUENT: &str = "Segoe Fluent Icons";
+        let hdc = CreateCompatibleDC(null_mut());
+        let font = CreateFontW(
+            -16, 0, 0, 0, FW_NORMAL as i32, 0, 0, 0, DEFAULT_CHARSET as u32, OUT_DEFAULT_PRECIS as u32,
+            CLIP_DEFAULT_PRECIS as u32, ANTIALIASED_QUALITY as u32, DEFAULT_PITCH as u32, wide(FLUENT).as_ptr(),
+        );
+        let old = SelectObject(hdc, font);
+        let mut buf = [0u16; 64];
+        let n = GetTextFaceW(hdc, buf.len() as i32, buf.as_mut_ptr());
+        SelectObject(hdc, old);
+        DeleteObject(font);
+        DeleteDC(hdc);
+        // 글꼴이 없으면 GDI가 다른 글꼴로 바꿔치기하므로 실제 이름으로 확인
+        let actual = String::from_utf16_lossy(&buf[..n.max(1) as usize - 1]);
+        if actual.eq_ignore_ascii_case(FLUENT) { FLUENT } else { "Segoe MDL2 Assets" }
+    })
+}
 const NUM_FONT: &str = "Bahnschrift SemiBold";
 const LABEL_FONT: &str = "Malgun Gothic";
 
-/// 위젯 기본 표시 이름 (장치 순서: DeathAdder, BlackShark, Viper, GameSir)
-pub const SHORT_NAMES: [&str; 4] = ["DeathAdder V4 Pro", "BlackShark V2 Pro", "Viper Ultimate", "GameSir G7 Pro"];
 
 /// 타일 하나의 표시 내용. 이전과 같으면 다시 그리지 않는다.
 #[derive(Clone, PartialEq)]
@@ -80,7 +100,12 @@ fn level_color(l: u8) -> Rgb {
 }
 
 pub fn device_tile(d: &DeviceState, name: &str) -> Tile {
-    let glyph = if d.product_id == 1365 { G_HEADSET } else { G_MOUSE };
+    let glyph = match d.kind {
+        Kind::Mouse => G_MOUSE,
+        Kind::Headset => G_HEADSET,
+        Kind::Keyboard => G_KEYBOARD,
+        Kind::Other => G_DEVICE,
+    };
     let name = name.to_string();
     let off = |name: String, text: &str| Tile {
         glyph, name, fraction: None, color: SUBTEXT, text: text.into(), numeric: false, charging: false,
@@ -215,10 +240,9 @@ impl Widget {
         if self.drawn.as_ref().is_some_and(|(t, s, d, h)| *t == tiles && *s == style && *d == dpi && *h == hovered) {
             return None;
         }
-        let moved = unsafe { self.render(&tiles, style, dpi, hovered) };
         self.drawn = Some((tiles.clone(), style, dpi, hovered));
-        self.last = Some((tiles, style));
-        moved
+        self.last = Some((tiles.clone(), style));
+        unsafe { self.render(&tiles, style, dpi, hovered) }
     }
 
     /// 호버 상태만 바뀌었을 때 마지막 내용으로 다시 그림
@@ -303,6 +327,14 @@ impl Widget {
             let hdc_screen = GetDC(null_mut());
             let hdc = CreateCompatibleDC(hdc_screen);
             let (bmp, bits) = dib(hdc, w, h);
+            if bits.is_null() {
+                // 메모리 부족 등: 이번에는 그리지 않고 다음 갱신 때 다시 시도
+                DeleteObject(bmp);
+                DeleteDC(hdc);
+                ReleaseDC(null_mut(), hdc_screen);
+                self.drawn = None;
+                return None;
+            }
             let old = SelectObject(hdc, bmp);
             let px = std::slice::from_raw_parts_mut(bits, (w * h) as usize);
             // 호버 중에는 창 전체를 알파 1/255로 채워(눈에 안 보임) 타일 사이 틈에서도 마우스를 놓치지 않게 한다
@@ -325,7 +357,7 @@ impl Widget {
                         c.blend(px0 + x, y, TILE_BG, rounded_rect_alpha(x, y, pw, ph, r) * 0.9);
                     }
                 }
-                let g = text_run(ICON_FONT, pw as f32 * 0.55, &G_GEAR.to_string());
+                let g = text_run(icon_font(), pw as f32 * 0.55, &G_GEAR.to_string());
                 blit(&mut c, &g, px0 + pw / 2, pw / 2, TEXT);
                 draw_slider(&mut c, &self.slider, style.bg_opacity, tf);
             }
@@ -653,7 +685,7 @@ fn draw_tile(c: &mut Canvas, x0: i32, y0: i32, t: i32, tile: &Tile, bg_alpha: f3
     let dim = tile.fraction.is_none();
     let glyph_color = if dim { SUBTEXT } else { TEXT };
     let gtext = tile.glyph.to_string();
-    let g = text_run(ICON_FONT, tf * 0.19, &gtext);
+    let g = text_run(icon_font(), tf * 0.19, &gtext);
     blit(c, &g, x0 + cx as i32, y0 + (cy - tf * 0.07) as i32, glyph_color);
 
     let (face, em) = if tile.numeric { (NUM_FONT, tf * 0.135) } else { (LABEL_FONT, tf * 0.095) };
@@ -663,7 +695,7 @@ fn draw_tile(c: &mut Canvas, x0: i32, y0: i32, t: i32, tile: &Tile, bg_alpha: f3
 
     // 충전 중이면 타일 오른쪽 위 모서리에 번개
     if tile.charging {
-        let bolt = text_run(ICON_FONT, tf * 0.14, &G_BOLT.to_string());
+        let bolt = text_run(icon_font(), tf * 0.14, &G_BOLT.to_string());
         blit(c, &bolt, x0 + t - (tf * 0.13) as i32, y0 + (tf * 0.13) as i32, BLUE);
     }
 
@@ -695,6 +727,13 @@ fn text_run(face: &str, em: f32, text: &str) -> Run {
         // 기울어진 글리프가 잘리지 않게 여유를 둔다
         let (w, h) = (sz.cx + 4, sz.cy + 2);
         let (bmp, bits) = dib(hdc, w.max(1), h.max(1));
+        if bits.is_null() {
+            DeleteObject(bmp);
+            SelectObject(hdc, old_font);
+            DeleteObject(font);
+            DeleteDC(hdc);
+            return Run { w: 1, cov: vec![0], ink: (0, 0, 0, 0) };
+        }
         let old_bmp = SelectObject(hdc, bmp);
         let px = std::slice::from_raw_parts_mut(bits, (w * h).max(1) as usize);
         px.fill(0);

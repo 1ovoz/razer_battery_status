@@ -13,16 +13,16 @@ use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::SystemInformation::{GetLocalTime, GetTickCount64};
 use windows_sys::Win32::System::Threading::CreateMutexW;
 use windows_sys::Win32::UI::HiDpi::*;
-use windows_sys::Win32::UI::Input::XboxController::*;
+use windows_sys::Win32::UI::Input::XboxController::XINPUT_BATTERY_INFORMATION;
 use windows_sys::Win32::UI::Shell::*;
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
 use razer_battery_tray::config::{Config, Reminder, DEVICES};
-use razer_battery_tray::gamepad::{PadLevel, PadState, PadStatus, PAD_NAME};
+use razer_battery_tray::gamepad::{PadLevel, PadState, PadStatus, PAD_NAME, PAD_SHORT_NAME};
 use razer_battery_tray::parser::{DeviceState, State, Status, N, TRACKED};
 use razer_battery_tray::watcher::{default_log_dir, Watcher};
 
-use crate::widget::{device_tile, pad_tile, Style, Widget, SHORT_NAMES};
+use crate::widget::{device_tile, pad_tile, Style, Widget};
 
 const WM_TRAY: u32 = WM_APP + 1;
 const TIMER_ID: usize = 1;
@@ -38,7 +38,12 @@ const PAD: usize = N;
 
 /// 트레이 툴팁·알림용 기본 이름
 fn full_name(i: usize) -> &'static str {
-    if i == PAD { PAD_NAME } else { TRACKED[i].1 }
+    if i == PAD { PAD_NAME } else { TRACKED[i].name }
+}
+
+/// 위젯용 기본 이름
+fn short_name(i: usize) -> &'static str {
+    if i == PAD { PAD_SHORT_NAME } else { TRACKED[i].short_name }
 }
 
 static TASKBAR_CREATED: AtomicU32 = AtomicU32::new(0);
@@ -310,7 +315,7 @@ impl App {
         let tiles: Vec<_> = c.order.iter().copied()
             .filter(|&i| c.show_widget[i])
             .map(|i| {
-                let name = c.display_name(i, SHORT_NAMES[i]);
+                let name = c.display_name(i, short_name(i));
                 if i == PAD { pad_tile(&self.pad, name) } else { device_tile(&self.state.devices[i], name) }
             })
             .collect();
@@ -497,7 +502,7 @@ fn pad_visual(p: &PadState) -> Visual {
 fn read_pad() -> PadStatus {
     for user in 0..4 {
         let mut info: XINPUT_BATTERY_INFORMATION = unsafe { zeroed() };
-        let ok = unsafe { XInputGetBatteryInformation(user, BATTERY_DEVTYPE_GAMEPAD, &mut info) } == 0;
+        let ok = crate::syslib::xinput_battery(user, &mut info) == 0;
         let s = PadStatus::from_xinput(ok, info.BatteryType, info.BatteryLevel);
         if s != PadStatus::Disconnected {
             return s;
@@ -539,6 +544,10 @@ unsafe fn render_icon(size: i32, v: &Visual) -> HICON {
         let hdc = CreateCompatibleDC(null_mut());
         let (color_bmp, px) = dib(hdc, size, size);
         DeleteDC(hdc);
+        if px.is_null() {
+            DeleteObject(color_bmp);
+            return null_mut(); // 메모리 부족 등: 아이콘 없이 계속
+        }
         let px = std::slice::from_raw_parts_mut(px, (size * size) as usize);
         let r = size as f32 / 5.0;
         for y in 0..size {
@@ -569,6 +578,11 @@ unsafe fn text_coverage(size: i32, text: &str) -> Vec<f32> {
         let (tw, th) = (size * 3, size * 2);
         let hdc = CreateCompatibleDC(null_mut());
         let (tmp_bmp, tmp) = dib(hdc, tw, th);
+        if tmp.is_null() {
+            DeleteObject(tmp_bmp);
+            DeleteDC(hdc);
+            return vec![0.0; (size * size) as usize];
+        }
         let old_bmp = SelectObject(hdc, tmp_bmp);
         SetBkMode(hdc, TRANSPARENT as i32);
         SetTextColor(hdc, 0x00FF_FFFF);

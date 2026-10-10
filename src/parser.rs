@@ -3,11 +3,32 @@
 
 use serde::Deserialize;
 
-/// 추적 대상 기기: (productId, 표시 이름)
-pub const TRACKED: [(u32, &str); 3] = [
-    (190, "Razer DeathAdder V4 Pro"),
-    (1365, "Razer BlackShark V2 Pro"),
-    (122, "Razer Viper Ultimate"),
+/// 위젯 아이콘 종류
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Kind {
+    Mouse,
+    Headset,
+    Keyboard,
+    Other,
+}
+
+/// 추적할 Razer 기기 하나
+#[derive(Clone, Copy, Debug)]
+pub struct Tracked {
+    /// Synapse 로그의 "productId" 값
+    pub product_id: u32,
+    /// 트레이 툴팁·알림에 쓰는 이름
+    pub name: &'static str,
+    /// 위젯 타일 아래에 쓰는 짧은 이름
+    pub short_name: &'static str,
+    pub kind: Kind,
+}
+
+/// 추적 대상 기기. 기기를 추가하려면 여기에 한 줄만 넣으면 된다 (README 참고).
+pub const TRACKED: [Tracked; 3] = [
+    Tracked { product_id: 190, name: "Razer DeathAdder V4 Pro", short_name: "DeathAdder V4 Pro", kind: Kind::Mouse },
+    Tracked { product_id: 1365, name: "Razer BlackShark V2 Pro", short_name: "BlackShark V2 Pro", kind: Kind::Headset },
+    Tracked { product_id: 122, name: "Razer Viper Ultimate", short_name: "Viper Ultimate", kind: Kind::Mouse },
 ];
 pub const N: usize = TRACKED.len();
 
@@ -121,7 +142,7 @@ pub fn parse_line(line: &[u8]) -> Line {
     let mut obs = [None; N];
     for d in &devices {
         let Some(pid) = d.product_id else { continue };
-        let Some(i) = TRACKED.iter().position(|&(p, _)| p == pid) else { continue };
+        let Some(i) = TRACKED.iter().position(|t| t.product_id == pid) else { continue };
         let o = match (&d.power_status, d.has_battery) {
             (_, Some(false)) | (None, _) => Obs::NoPower,
             (Some(ps), _) => match ps.charging_status.as_deref() {
@@ -157,6 +178,7 @@ pub enum Status {
 pub struct DeviceState {
     pub product_id: u32,
     pub name: &'static str,
+    pub kind: Kind,
     pub status: Status,
     /// 마지막으로 관찰한 실제 잔량 (off일 때의 0은 포함하지 않음)
     pub level: Option<u8>,
@@ -206,9 +228,10 @@ pub struct State {
 impl Default for State {
     fn default() -> Self {
         Self {
-            devices: TRACKED.map(|(product_id, name)| DeviceState {
-                product_id,
-                name,
+            devices: TRACKED.map(|t| DeviceState {
+                product_id: t.product_id,
+                name: t.name,
+                kind: t.kind,
                 status: Status::Unknown,
                 level: None,
                 level_ts: None,

@@ -9,6 +9,8 @@ use std::time::SystemTime;
 use crate::parser::{parse_line, Event, Line};
 
 const PREFIX: &str = "systray_systrayv2";
+/// 한 줄 최대 길이. 실제 줄은 수십 KB지만, 줄바꿈 없는 비정상 파일이 메모리를 잡아먹지 않게 자른다.
+pub const MAX_LINE: usize = 1 << 20;
 const SUFFIX: &str = ".log";
 
 struct Cursor {
@@ -24,6 +26,8 @@ pub struct Stats {
     pub lines: usize,
     pub snapshots: usize,
     pub malformed: usize,
+    /// MAX_LINE보다 길어 건너뛴 줄
+    pub too_long: usize,
 }
 
 pub struct Watcher {
@@ -76,7 +80,7 @@ impl Watcher {
             let _ = read_new(&path, &mut self.cursors[idx], &mut line, &mut events, &mut self.stats);
         }
         // 여러 파일에 섞여 기록되므로 시각 순 정렬 (같은 시각은 원래 순서 유지)
-        events.sort_by(|a, b| a.ts.cmp(&b.ts));
+        events.sort_by_key(|e| e.ts);
         Ok(events)
     }
 }
@@ -107,13 +111,43 @@ fn read_new(
     let mut reader = reader.take(len - cur.offset);
     let mut pos = cur.offset;
     loop {
+        // 한 줄 읽기 (MAX_LINE을 넘는 부분은 버리고 줄 끝까지 건너뜀)
         line.clear();
-        let n = reader.read_until(b'\n', line)?;
-        if n == 0 || line.last() != Some(&b'\n') {
-            break; // 끝까지 읽었거나 마지막 줄이 아직 덜 써짐 → 다음에 다시
+        let (mut consumed, mut complete, mut too_long) = (0usize, false, false);
+        loop {
+            let buf = reader.fill_buf()?;
+            if buf.is_empty() {
+                break;
+            }
+            let (take, found) = match buf.iter().position(|&b| b == b'\n') {
+                Some(i) => (i + 1, true),
+                None => (buf.len(), false),
+            };
+            if !too_long {
+                if line.len() + take > MAX_LINE {
+                    too_long = true;
+                    line.clear();
+                    line.shrink_to(64 * 1024);
+                } else {
+                    line.extend_from_slice(&buf[..take]);
+                }
+            }
+            reader.consume(take);
+            consumed += take;
+            if found {
+                complete = true;
+                break;
+            }
         }
-        pos += n as u64;
+        if !complete {
+            break; // 끝까지 읽었거나 마지막 줄이 아직 덜 써짐 → 다음에 같은 자리부터 다시
+        }
+        pos += consumed as u64;
         stats.lines += 1;
+        if too_long {
+            stats.too_long += 1;
+            continue;
+        }
         match parse_line(line) {
             Line::Snapshot(e) => {
                 stats.snapshots += 1;

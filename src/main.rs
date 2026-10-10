@@ -5,6 +5,8 @@ mod tray;
 #[cfg(windows)]
 mod settings;
 #[cfg(windows)]
+mod syslib;
+#[cfg(windows)]
 mod widget;
 
 #[cfg(windows)]

@@ -8,7 +8,6 @@ use std::ptr::{null, null_mut};
 use std::sync::atomic::{AtomicPtr, Ordering};
 
 use windows_sys::Win32::Foundation::*;
-use windows_sys::Win32::Graphics::Dwm::DwmSetWindowAttribute;
 use windows_sys::Win32::Graphics::Gdi::*;
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::Registry::*;
@@ -69,6 +68,9 @@ const SS_CENTER: u32 = 0x1;
 const SS_CENTERIMAGE: u32 = 0x200;
 const TBM_GETPOS: u32 = WM_USER;
 
+/// 장치가 4개보다 많거나 적을 때 장치 카드 아래쪽을 밀거나 당기는 양 (96 DPI 기준)
+const DY: i32 = (DEVICES as i32 - 4) * 42;
+
 const THRESHOLDS: [u8; 10] = [5, 10, 15, 20, 25, 30, 35, 40, 45, 50];
 
 const RUN_KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
@@ -124,7 +126,7 @@ pub fn open(config: Config, names: [String; DEVICES]) {
         let dpi = GetDpiForSystem();
         let s = |v: i32| v * dpi as i32 / 96;
         let style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
-        let mut r = RECT { left: 0, top: 0, right: s(600), bottom: s(516) };
+        let mut r = RECT { left: 0, top: 0, right: s(600), bottom: s(516 + DY) };
         AdjustWindowRectExForDpi(&mut r, style, 0, 0, dpi);
         let (w, h) = (r.right - r.left, r.bottom - r.top);
         let x = (GetSystemMetrics(SM_CXSCREEN) - w) / 2;
@@ -142,15 +144,15 @@ pub fn open(config: Config, names: [String; DEVICES]) {
         }
         HWND_SETTINGS.store(hwnd, Ordering::Relaxed);
         // 어두운 제목 표시줄 (Windows 10 20H1+), 제목 표시줄 색을 배경색과 맞춤 (Windows 11)
-        let dark: u32 = 1;
-        DwmSetWindowAttribute(hwnd, 20, &dark as *const u32 as *const _, 4);
-        DwmSetWindowAttribute(hwnd, 35, &C_WINDOW as *const u32 as *const _, 4);
+        crate::syslib::dwm_set_u32(hwnd, 20, 1);
+        crate::syslib::dwm_set_u32(hwnd, 35, C_WINDOW);
         build_controls(hwnd, dpi);
         ShowWindow(hwnd, SW_SHOWNORMAL);
         SetForegroundWindow(hwnd);
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 unsafe fn control(parent: HWND, class: &str, text: &str, style: u32, x: i32, y: i32, w: i32, h: i32, id: i32) -> HWND {
     unsafe {
         let hwnd = CreateWindowExW(
@@ -165,7 +167,7 @@ unsafe fn control(parent: HWND, class: &str, text: &str, style: u32, x: i32, y: 
             _ => None,
         };
         if let Some(t) = theme {
-            SetWindowTheme(hwnd, wide(t).as_ptr(), null());
+            crate::syslib::set_window_theme(hwnd, t);
         }
         hwnd
     }
@@ -249,8 +251,8 @@ unsafe fn build_controls(hwnd: HWND, dpi: u32) {
         CARDS.with(|c| {
             *c.borrow_mut() = vec![
                 RECT { left: s(12), top: s(12), right: s(588), bottom: s(60) },
-                RECT { left: s(12), top: s(70), right: s(588), bottom: s(284) },
-                RECT { left: s(12), top: s(294), right: s(588), bottom: s(460) },
+                RECT { left: s(12), top: s(70), right: s(588), bottom: s(284 + DY) },
+                RECT { left: s(12), top: s(294 + DY), right: s(588), bottom: s(460 + DY) },
             ]
         });
         let h = control(hwnd, "BUTTON", "", cb, s(28), s(22), s(20), s(28), ID_AUTOSTART);
@@ -285,8 +287,8 @@ unsafe fn build_controls(hwnd: HWND, dpi: u32) {
 
         // 카드 3: 알림·위젯 모양
         let combo_style = (WS_TABSTOP | WS_VSCROLL) | CBS_DROPDOWNLIST as u32;
-        label("배터리 부족 기준", 28, 306, 180, -1);
-        let h = control(hwnd, "COMBOBOX", "", combo_style, s(220), s(306), s(150), s(300), ID_THRESHOLD);
+        label("배터리 부족 기준", 28, 306 + DY, 180, -1);
+        let h = control(hwnd, "COMBOBOX", "", combo_style, s(220), s(306 + DY), s(150), s(300), ID_THRESHOLD);
         for (i, t) in THRESHOLDS.iter().enumerate() {
             SendMessageW(h, CB_ADDSTRING, 0, wide(&format!("{t}% 미만")).as_ptr() as LPARAM);
             if *t == cfg.low_threshold {
@@ -297,8 +299,8 @@ unsafe fn build_controls(hwnd: HWND, dpi: u32) {
             SendMessageW(h, CB_SETCURSEL, 2, 0); // 15%
         }
 
-        label("부족 알림", 28, 344, 180, -1);
-        let h = control(hwnd, "COMBOBOX", "", combo_style, s(220), s(344), s(150), s(300), ID_REMIND);
+        label("부족 알림", 28, 344 + DY, 180, -1);
+        let h = control(hwnd, "COMBOBOX", "", combo_style, s(220), s(344 + DY), s(150), s(300), ID_REMIND);
         for (i, r) in Remind::CHOICES.iter().enumerate() {
             SendMessageW(h, CB_ADDSTRING, 0, wide(&r.label()).as_ptr() as LPARAM);
             if *r == cfg.remind {
@@ -309,8 +311,8 @@ unsafe fn build_controls(hwnd: HWND, dpi: u32) {
             SendMessageW(h, CB_SETCURSEL, 5, 0); // 1번만
         }
 
-        label("갱신 주기", 28, 382, 180, -1);
-        let h = control(hwnd, "COMBOBOX", "", combo_style, s(220), s(382), s(150), s(300), ID_POLL);
+        label("갱신 주기", 28, 382 + DY, 180, -1);
+        let h = control(hwnd, "COMBOBOX", "", combo_style, s(220), s(382 + DY), s(150), s(300), ID_POLL);
         for (i, p) in POLL_CHOICES.iter().enumerate() {
             let text = if *p == POLL_DEFAULT { format!("{p}초 (추천)") } else { format!("{p}초") };
             SendMessageW(h, CB_ADDSTRING, 0, wide(&text).as_ptr() as LPARAM);
@@ -322,14 +324,14 @@ unsafe fn build_controls(hwnd: HWND, dpi: u32) {
             SendMessageW(h, CB_SETCURSEL, 1, 0); // 5초
         }
 
-        label("위젯 배경 불투명도", 28, 420, 180, -1);
-        let h = control(hwnd, "msctls_trackbar32", "", WS_TABSTOP | TBS_NOTICKS as u32, s(214), s(420), s(300), s(28), ID_OPACITY);
+        label("위젯 배경 불투명도", 28, 420 + DY, 180, -1);
+        let h = control(hwnd, "msctls_trackbar32", "", WS_TABSTOP | TBS_NOTICKS, s(214), s(420 + DY), s(300), s(28), ID_OPACITY);
         SendMessageW(h, TBM_SETRANGE, 1, (100 << 16) as LPARAM);
         SendMessageW(h, TBM_SETPOS, 1, cfg.bg_opacity as LPARAM);
-        label(&format!("{}%", cfg.bg_opacity), 520, 420, 60, ID_OPACITY_LABEL);
+        label(&format!("{}%", cfg.bg_opacity), 520, 420 + DY, 60, ID_OPACITY_LABEL);
 
-        control(hwnd, "BUTTON", "저장", WS_TABSTOP | BS_DEFPUSHBUTTON as u32, s(372), s(474), s(100), s(32), IDOK);
-        control(hwnd, "BUTTON", "취소", WS_TABSTOP, s(482), s(474), s(100), s(32), IDCANCEL);
+        control(hwnd, "BUTTON", "저장", WS_TABSTOP | BS_DEFPUSHBUTTON as u32, s(372), s(474 + DY), s(100), s(32), IDOK);
+        control(hwnd, "BUTTON", "취소", WS_TABSTOP, s(482), s(474 + DY), s(100), s(32), IDCANCEL);
     }
 }
 

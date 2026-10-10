@@ -3,6 +3,7 @@
 //! Win32 호출은 tray.rs에서 하고, 여기서는 해석과 표시 문자열만 다룬다.
 
 pub const PAD_NAME: &str = "GameSir G7 Pro";
+pub const PAD_SHORT_NAME: &str = "GameSir G7 Pro";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum PadLevel {

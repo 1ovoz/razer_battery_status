@@ -66,7 +66,7 @@ fn real_logs_parse_cleanly() {
         eprintln!("{:>5} {:?} {:?} -> {:?}", d.product_id, d.status, d.level, d.tooltip(d.name));
     }
     // 로그에 한 번이라도 잔량이 찍힌 기기는 Unknown이면 안 됨
-    for (i, &(pid, _)) in TRACKED.iter().enumerate() {
+    for (i, pid) in TRACKED.iter().map(|t| t.product_id).enumerate() {
         if events.iter().any(|e| matches!(e.obs[i], Some(razer_battery_tray::parser::Obs::On { .. }))) {
             assert_ne!(state.devices[i].status, Status::Unknown, "pid {pid}");
             assert!(state.devices[i].level.is_some());
@@ -135,6 +135,25 @@ fn incremental_matches_full_load() {
     }
     assert_eq!(w2.stats.malformed, 0);
     assert_eq!(summary(&incr), summary(&full));
+    let _ = fs::remove_dir_all(&tmp);
+}
+
+/// 줄바꿈 없이 아주 긴 줄은 건너뛰고, 그 뒤의 정상 줄은 읽어야 한다
+#[test]
+fn overlong_line_is_skipped() {
+    let tmp = temp_dir("long");
+    let p = tmp.join("systray_systrayv2.log");
+    let ok = r#"[2026/10/10 10:00:01.000] info: Device  [{"productId":122,"powerStatus":{"chargingStatus":"NoCharge_BatteryFull","level":42}}]"#;
+    let mut data = format!("[2026/10/10 10:00:00.000] info: Device  [{}", "x".repeat(razer_battery_tray::watcher::MAX_LINE * 2));
+    data += "\r\n";
+    data += ok;
+    data += "\r\n";
+    fs::write(&p, data).unwrap();
+    let mut w = Watcher::new(&tmp);
+    let mut s = State::default();
+    s.apply_all(&w.poll().unwrap());
+    assert_eq!(w.stats.too_long, 1);
+    assert_eq!(s.devices[2].level, Some(42));
     let _ = fs::remove_dir_all(&tmp);
 }
 

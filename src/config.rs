@@ -160,7 +160,8 @@ impl Config {
                     if let Some(i) = k.strip_prefix("nickname").and_then(|n| n.parse::<usize>().ok())
                         && i < DEVICES
                     {
-                        c.nickname[i] = v.trim().to_string();
+                        // 설정 창 입력 제한과 같은 40자까지만 (손으로 고친 파일 대비)
+                        c.nickname[i] = v.trim().chars().take(40).collect();
                     }
                 }
             }
@@ -259,9 +260,11 @@ mod tests {
     #[test]
     fn roundtrip() {
         let mut c = Config::default();
-        c.order = [2, 0, 3, 1];
+        c.order.reverse();
         c.show_widget[1] = false;
-        c.show_tray = [true, false, true, false];
+        for (i, v) in c.show_tray.iter_mut().enumerate() {
+            *v = i % 2 == 0;
+        }
         c.nickname[2] = "내 마우스 = 메인".into();
         c.low_threshold = 20;
         c.remind = Remind::Every(5);
@@ -285,15 +288,24 @@ mod tests {
         assert_eq!(c.bg_opacity, 100);
         assert_eq!(c.remind, Remind::Once);
         assert_eq!(c.layout, Layout::Grid);
-        assert_eq!(c.show_tray, [false, true, true, true]);
+        assert!(!c.show_tray[0] && c.show_tray[1..].iter().all(|&b| b));
     }
 
     #[test]
     fn order_must_be_permutation() {
-        assert_eq!(Config::parse("order=3,2,1,0").order, [3, 2, 1, 0]);
-        assert_eq!(Config::parse("order=0,0,1,2").order, [0, 1, 2, 3]);
-        assert_eq!(Config::parse("order=0,1,2").order, [0, 1, 2, 3]);
-        assert_eq!(Config::parse("order=0,1,2,9").order, [0, 1, 2, 3]);
+        // 장치 수(DEVICES)가 바뀌어도 그대로 돌아가게 문자열을 만들어 쓴다
+        let list = |v: &[usize]| format!("order={}", v.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(","));
+        let default = Config::default().order;
+        let mut reversed = default;
+        reversed.reverse();
+        assert_eq!(Config::parse(&list(&reversed)).order, reversed);
+        let mut dup = default;
+        dup[1] = dup[0];
+        assert_eq!(Config::parse(&list(&dup)).order, default, "중복");
+        assert_eq!(Config::parse(&list(&default[1..])).order, default, "개수 부족");
+        let mut out = default;
+        out[0] = DEVICES + 5;
+        assert_eq!(Config::parse(&list(&out)).order, default, "범위 밖");
     }
 
     #[test]
